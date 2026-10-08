@@ -10,12 +10,11 @@ import logging
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -238,6 +237,54 @@ class DragHandle(QLabel):
             super().mouseReleaseEvent(event)
 
 
+class QuestionInput(QPlainTextEdit):
+    """多行追问输入：Enter 发送，Shift/Alt + Enter 换行。"""
+
+    submitted = Signal()
+    MAX_LENGTH = 2000
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._composing = False
+        self.setTabChangesFocus(True)
+        self.setMinimumHeight(74)
+        self.setMaximumHeight(110)
+        self.textChanged.connect(self._limit_length)
+
+    def inputMethodEvent(self, event) -> None:  # noqa: N802
+        self._composing = bool(event.preeditString())
+        super().inputMethodEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not self._composing:
+            modifiers = event.modifiers() & (Qt.ShiftModifier | Qt.AltModifier |
+                                             Qt.ControlModifier | Qt.MetaModifier)
+            if modifiers & (Qt.ShiftModifier | Qt.AltModifier):
+                self.insertPlainText("\n")
+                event.accept()
+                return
+            if modifiers == Qt.NoModifier:
+                self.submitted.emit()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _limit_length(self) -> None:
+        text = self.toPlainText()
+        if len(text) <= self.MAX_LENGTH:
+            return
+        # Qt 文本游标使用 UTF-16 位置，不能直接用 Python 字符数切 emoji。
+        limit = len(text[:self.MAX_LENGTH].encode("utf-16-le")) // 2
+        cursor = self.textCursor()
+        position = cursor.position()
+        trim = QTextCursor(self.document())
+        trim.setPosition(limit)
+        trim.movePosition(QTextCursor.End, QTextCursor.KeepAnchor)
+        trim.removeSelectedText()
+        cursor.setPosition(min(position, limit))
+        self.setTextCursor(cursor)
+
+
 class PopupWindow(QWidget):
     """译文、解释、追问弹窗，支持保持在最前与流式渲染。"""
 
@@ -415,14 +462,14 @@ class PopupWindow(QWidget):
         status_row.addWidget(retry)
         layout.addLayout(status_row)
         input_row = QHBoxLayout()
-        self.question_input = QLineEdit()
-        self.question_input.setPlaceholderText("接着问…（Enter 发送）")
-        self.question_input.setMaxLength(2000)
-        self.question_input.returnPressed.connect(self._submit_question)
+        self.question_input = QuestionInput()
+        self.question_input.setPlaceholderText("接着问…\nEnter 发送；Shift+Enter / Alt+Enter 换行")
+        self.question_input.setToolTip("最多 2000 字符；Enter 发送，Shift+Enter 或 Alt+Enter 换行。")
+        self.question_input.submitted.connect(self._submit_question)
         input_row.addWidget(self.question_input, 1)
         self.btn_send = QPushButton("发送")
         self.btn_send.clicked.connect(self._submit_question)
-        input_row.addWidget(self.btn_send)
+        input_row.addWidget(self.btn_send, 0, Qt.AlignBottom)
         layout.addLayout(input_row)
         copy = QPushButton("复制对话")
         copy.clicked.connect(lambda: self._copy_page("chat"))
@@ -448,7 +495,7 @@ class PopupWindow(QWidget):
         return self._pinned
 
     def _submit_question(self) -> None:
-        question = self.question_input.text().strip()
+        question = self.question_input.toPlainText().strip()
         if not question or self._chat_busy:
             return
         self.question_input.clear()

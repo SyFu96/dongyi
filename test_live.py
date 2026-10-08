@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import time
 
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 import win32gui
@@ -69,11 +70,15 @@ def main():
         controller.on_mouse_down({"phys": (-5000, -5000)})
         assert controller.popup.isVisible()
         controller.popup.tabs.setCurrentIndex(2)
-        controller.popup.question_input.setText("请只回答一个词：stores 在这个句子里是什么意思？")
-        controller.popup.btn_send.click()
+        editor = controller.popup.question_input
+        editor.insertPlainText("请只回答一个词：")
+        QTest.keyClick(editor, Qt.Key_Return, Qt.ShiftModifier)
+        editor.insertPlainText("stores 在这个句子里是什么意思？")
+        assert controller._chat_pending_question is None
+        QTest.keyClick(editor, Qt.Key_Return)
         first = wait_done(controller, "chat")
         assert first.strip() and len(controller._chat_history) == 2
-        controller.popup.question_input.setText("刚才那个英文词是什么？请只回答英文词。")
+        controller.popup.question_input.setPlainText("刚才那个英文词是什么？请只回答英文词。")
         controller.popup.btn_send.click()
         second = wait_done(controller, "chat")
         assert "stores" in second.lower(), second
@@ -82,12 +87,12 @@ def main():
         controller.popup.tabs.setCurrentIndex(1)
         explanation_stop_ms = stop_after_first_chunk(controller, "explain")
         controller.popup.tabs.setCurrentIndex(2)
-        controller.popup.question_input.setText("请详细写出电池储能的原理、应用和注意事项，至少2000字。")
+        controller.popup.question_input.setPlainText("请详细写出电池储能的原理、应用和注意事项，至少2000字。")
         controller.popup.btn_send.click()
         question_stop_ms = stop_after_first_chunk(controller, "chat")
         assert controller.popup.btn_send.isEnabled()
         assert controller._chat_pending_question is None
-        controller.popup.question_input.setText("不用继续长篇回答了，请只回答英文单词 OK。")
+        controller.popup.question_input.setPlainText("不用继续长篇回答了，请只回答英文单词 OK。")
         controller.popup.btn_send.click()
         resumed = wait_done(controller, "chat")
         assert resumed.strip(), resumed

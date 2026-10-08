@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -179,7 +180,7 @@ class FeatureTests(unittest.TestCase):
         c.popup.tabs.setCurrentIndex(2)
         self.assertTrue(c.popup.is_pinned())
         self.assertFalse(c.popup.windowFlags() & Qt.WindowDoesNotAcceptFocus)
-        c.popup.question_input.setText("stores 是什么意思？")
+        c.popup.question_input.setPlainText("stores 是什么意思？")
         QTest.keyClick(c.popup.question_input, Qt.Key_Return)
         kind, question, messages = c.llm.requests[-1]
         self.assertEqual(kind, "chat")
@@ -188,12 +189,87 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("化学物质", messages[0]["content"])
         c.llm.chunk.emit("chat", "stores 表示储存。")
         c.llm.finished.emit("chat", "stores 表示储存。")
-        c.popup.question_input.setText("换个例子。")
+        c.popup.question_input.setPlainText("换个例子。")
         c.popup.btn_send.click()
         messages = c.llm.requests[-1][2]
         self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
         self.assertEqual(messages[2]["content"], "stores 表示储存。")
         self.assertIn("stores 表示储存。", c.popup.chat_view.toPlainText())
+
+    def test_shift_and_alt_enter_insert_newline_without_sending(self):
+        c = self.controller
+        for key in (Qt.Key_Return, Qt.Key_Enter):
+            for modifier in (Qt.ShiftModifier, Qt.AltModifier):
+                with self.subTest(key=key, modifier=modifier):
+                    self.open_selection()
+                    c.popup.tabs.setCurrentIndex(2)
+                    editor = c.popup.question_input
+                    requests = len(c.llm.requests)
+                    editor.insertPlainText("第一行问题")
+                    QTest.keyClick(editor, key, modifier)
+                    self.assertEqual(editor.toPlainText(), "第一行问题\n")
+                    self.assertEqual(len(c.llm.requests), requests)
+                    editor.insertPlainText("第二行补充")
+                    QTest.keyClick(editor, key)
+                    expected = "第一行问题\n第二行补充"
+                    self.assertEqual(len(c.llm.requests), requests + 1)
+                    self.assertEqual(c.llm.requests[-1][1], expected)
+                    self.assertEqual(c.llm.requests[-1][2][-1]["content"], expected)
+                    self.assertEqual(c.popup._chat_turns[-1][0], expected)
+                    self.assertEqual(editor.toPlainText(), "")
+
+    def test_send_button_preserves_multiline_text_and_blank_lines(self):
+        c = self.controller
+        self.open_selection()
+        c.popup.tabs.setCurrentIndex(2)
+        c.popup.question_input.setPlainText("第一段。\n\n第二段，包含补充说明。")
+        c.popup.btn_send.click()
+        self.assertEqual(c.llm.requests[-1][1], "第一段。\n\n第二段，包含补充说明。")
+        self.assertEqual(c.popup.question_input.toPlainText(), "")
+
+    def test_multiline_draft_is_retained_while_busy_and_sendable_after_stop(self):
+        c = self.controller
+        self.open_selection()
+        c.popup.tabs.setCurrentIndex(2)
+        c.on_question("正在回答的问题。")
+        editor = c.popup.question_input
+        editor.insertPlainText("下一问第一行")
+        QTest.keyClick(editor, Qt.Key_Return, Qt.ShiftModifier)
+        editor.insertPlainText("下一问第二行")
+        requests = len(c.llm.requests)
+        QTest.keyClick(editor, Qt.Key_Return)
+        self.assertEqual(len(c.llm.requests), requests)
+        self.assertEqual(editor.toPlainText(), "下一问第一行\n下一问第二行")
+        c.popup._stops["chat"].click()
+        QTest.keyClick(editor, Qt.Key_Return)
+        self.assertEqual(c.llm.requests[-1][1], "下一问第一行\n下一问第二行")
+
+    def test_ime_composition_enter_does_not_submit_question(self):
+        c = self.controller
+        self.open_selection()
+        c.popup.tabs.setCurrentIndex(2)
+        editor = c.popup.question_input
+        editor.insertPlainText("问题：")
+        requests = len(c.llm.requests)
+        QApplication.sendEvent(editor, QInputMethodEvent("pin", []))
+        QTest.keyClick(editor, Qt.Key_Return)
+        self.assertEqual(len(c.llm.requests), requests)
+        committed = QInputMethodEvent("", [])
+        committed.setCommitString("拼音")
+        QApplication.sendEvent(editor, committed)
+        self.assertIn("拼音", editor.toPlainText())
+        QTest.keyClick(editor, Qt.Key_Return)
+        self.assertEqual(len(c.llm.requests), requests + 1)
+
+    def test_multiline_input_keeps_length_limit_without_splitting_emoji(self):
+        c = self.controller
+        editor = c.popup.question_input
+        text = "第一行\n" + "😀" * 2100
+        editor.setPlainText(text)
+        self.assertEqual(editor.toPlainText(), text[:2000])
+        editor.moveCursor(editor.textCursor().MoveOperation.End)
+        editor.insertPlainText("超出长度")
+        self.assertEqual(editor.toPlainText(), text[:2000])
 
     def test_failed_question_retry_does_not_duplicate_history_and_new_text_clears_it(self):
         c = self.controller
@@ -254,7 +330,7 @@ class FeatureTests(unittest.TestCase):
         self.assertIn("回答的第一部分。", c.popup.chat_view.toPlainText())
         self.assertEqual(len(c._chat_history), 2)
         self.assertIn("回答未完成", c._chat_history[-1]["content"])
-        c.popup.question_input.setText("这部分是什么意思？")
+        c.popup.question_input.setPlainText("这部分是什么意思？")
         QTest.keyClick(c.popup.question_input, Qt.Key_Return)
         self.assertEqual(c.llm.requests[-1][1], "这部分是什么意思？")
         self.assertIn("回答的第一部分。", c.llm.requests[-1][2][-2]["content"])
@@ -272,7 +348,7 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(len(c.llm.cancellations), cancellations)
         self.assertTrue(c.popup.btn_send.isEnabled())
         self.assertFalse(c.popup.is_pending("chat"))
-        c.popup.question_input.setText("下一个问题。")
+        c.popup.question_input.setPlainText("下一个问题。")
         c.popup.btn_send.click()
         self.assertEqual(c.llm.requests[-1][1], "下一个问题。")
 
