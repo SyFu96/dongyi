@@ -1,0 +1,10 @@
+[project]
+name = "huayi"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "pynput>=1.8.2",
+    "pyside6>=6.11.2",
+    "pywin32>=312",
+    "uiautomation>=2.0.29",
+]

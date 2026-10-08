@@ -1,0 +1,23 @@
+{
+  "base_url": "http://localhost:11434",
+  "model": "qwen3-vl:30b-a3b-instruct",
+  "keep_alive": "30m",
+  "prefetch_explain": false,
+  "max_text_len": 3000,
+  "debounce_ms": 150,
+  "icon_timeout_s": 3,
+  "hotkeys": {
+    "translate": "<ctrl>+<alt>+t",
+    "explain": "<ctrl>+<alt>+e"
+  },
+  "prompts": {
+    "translate": "你是划词翻译引擎。自动识别语言：非中文译为中文，中文译为英文。只输出译文，保留换行与格式，不要任何解释。",
+    "explain": "解释用户划选的文本。若是专有名词/术语/缩写：给出全称与通行中文名、所属领域、一句话定义、2-3条关键背景或常见误读；若是句子/段落：解释其含义，外语内容附语法要点。不确定之处明确说明，禁止编造。中文回复。"
+  },
+  "blacklist_processes": [],
+  "theme": "dark",
+  "popup": {
+    "width": 460,
+    "height": 320
+  }
+}
