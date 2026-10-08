@@ -14,11 +14,12 @@ import http.client
 import json
 import logging
 import queue
+import socket
 import threading
 import urllib.parse
 from typing import Callable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def stream_chat(
     cancelled: Callable[[], bool] | None = None,
     options: dict | None = None,
     on_conn: Callable[[http.client.HTTPConnection], None] | None = None,
+    messages: list[dict[str, str]] | None = None,
 ) -> str:
     """发起一条流式请求并返回完整文本。
 
@@ -89,7 +91,7 @@ def stream_chat(
         "stream": True,
         "think": False,
         "keep_alive": cfg.get("keep_alive", "30m"),
-        "messages": [
+        "messages": messages if messages is not None else [
             {"role": "system", "content": cfg["prompts"][kind]},
             {"role": "user", "content": text},
         ],
@@ -101,6 +103,9 @@ def stream_chat(
     conn = http.client.HTTPConnection(host, port, timeout=3)
     if on_conn is not None:
         on_conn(conn)
+    if cancelled is not None and cancelled():
+        conn.close()
+        raise _StreamAborted
     try:
         conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
         # TCP 连接用 3s 超时；请求已发出后，读响应放宽到 60s：
@@ -109,6 +114,7 @@ def stream_chat(
             conn.sock.settimeout(60.0)
         resp = conn.getresponse()
     except (OSError, http.client.HTTPException) as e:
+        conn.close()
         if cancelled is not None and cancelled():
             raise _StreamAborted from e
         raise OllamaConnectError(
@@ -182,7 +188,7 @@ class _Worker(threading.Thread):
         self._cancel_requested = False
         self._inflight: http.client.HTTPConnection | None = None
 
-    def submit(self, item: tuple[int, str | None]) -> None:
+    def submit(self, item: tuple[int, str | None, list[dict[str, str]] | None]) -> None:
         self._q.put(item)
 
     def cancel(self) -> None:
@@ -190,6 +196,11 @@ class _Worker(threading.Thread):
             self._cancel_requested = True
             conn = self._inflight
         if conn is not None:
+            try:
+                if conn.sock is not None:
+                    conn.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 conn.close()  # worker 正阻塞在 readline；断流 → 捕获 → 静默退出
             except Exception:  # noqa: BLE001
@@ -220,7 +231,7 @@ class _Worker(threading.Thread):
             item = self._q.get()
             if item is _SHUTDOWN:
                 break
-            req_id, text = item
+            req_id, text, messages = item
             try:
                 if not self._is_current(req_id):
                     continue  # 排队期间已被取代/取消
@@ -230,9 +241,13 @@ class _Worker(threading.Thread):
                 if text is None:
                     self._run_warmup()
                 else:
-                    self._run_request(req_id, text)
+                    self._run_request(req_id, text, messages)
             except Exception:  # noqa: BLE001 — run 本身永不抛出
                 log.exception("LLM worker(%s) 任务异常", self._kind)
+            finally:
+                with self._lock:
+                    self._inflight = None
+                self._q.task_done()
 
     def _run_warmup(self) -> None:
         try:
@@ -245,15 +260,20 @@ class _Worker(threading.Thread):
                 on_conn=self._attach_conn,
             )
             log.info("预热/保活完成（model=%s）", self._client._cfg["model"])
+            self._client.warmup_finished.emit(True, "本地模型已就绪，可以划词翻译。")
         except Exception as e:  # noqa: BLE001 — 预热失败只记日志，不打扰用户
+            if isinstance(e, _StreamAborted):
+                return
             log.warning("预热/保活请求失败：%s", e)
+            self._client.warmup_finished.emit(False, str(e))
 
-    def _run_request(self, req_id: int, text: str) -> None:
+    def _run_request(self, req_id: int, text: str, messages: list[dict[str, str]] | None) -> None:
         def cancelled() -> bool:
             return self._is_cancelled(req_id)
 
         def on_chunk(delta: str) -> None:
-            self._client.chunk.emit(self._kind, delta)
+            if not cancelled():
+                self._client._delivery.emit("chunk", req_id, self._kind, delta)
 
         try:
             full = stream_chat(
@@ -263,24 +283,27 @@ class _Worker(threading.Thread):
                 on_chunk=on_chunk,
                 cancelled=cancelled,
                 on_conn=self._attach_conn,
+                messages=messages,
             )
         except _StreamAborted:
             return
         except LlmError as e:
             if cancelled():
                 return
-            self._client.failed.emit(self._kind, str(e))
+            self._client._delivery.emit("failed", req_id, self._kind, str(e))
             return
         except Exception:  # noqa: BLE001
             log.exception("LLM 未知错误")
             if not cancelled():
-                self._client.failed.emit(self._kind, "未知错误，请查看日志")
+                self._client._delivery.emit("failed", req_id, self._kind, "未知错误，请查看日志")
             return
         if not cancelled():
-            self._client.finished.emit(self._kind, full)
+            self._client._delivery.emit("finished", req_id, self._kind, full)
 
 
 class LlmClient(QObject):
+    _delivery = Signal(str, int, str, str)
+    warmup_finished = Signal(bool, str)
     chunk = Signal(str, str)  # (kind, delta)
     finished = Signal(str, str)  # (kind, full_text)
     failed = Signal(str, str)  # (kind, error_msg)
@@ -290,11 +313,13 @@ class LlmClient(QObject):
     def __init__(self, cfg: dict, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._cfg = cfg
-        self._id = {"translate": 1, "explain": 1}
+        self._id = {"translate": 1, "explain": 1, "chat": 1}
         self._id_lock = threading.Lock()
+        self._delivery.connect(self._deliver, Qt.ConnectionType.QueuedConnection)
         self._workers = {
             "translate": _Worker(self, "translate"),
             "explain": _Worker(self, "explain"),
+            "chat": _Worker(self, "chat"),
         }
         for w in self._workers.values():
             w.start()
@@ -303,17 +328,24 @@ class LlmClient(QObject):
         with self._id_lock:
             return self._id[kind]
 
-    def request(self, kind: str, text: str) -> None:
+    def _deliver(self, event: str, req_id: int, kind: str, text: str) -> None:
+        # 在 GUI 线程再次核对 id，排除已排入 Qt 队列的旧选区结果。
+        if req_id == self._current_id(kind):
+            getattr(self, event).emit(kind, text)
+
+    def request(self, kind: str, text: str, messages: list[dict[str, str]] | None = None) -> None:
         """新请求；自动取消同 kind 的旧请求（含断流）。"""
         self.cancel(kind)
         with self._id_lock:
             self._id[kind] += 1
             rid = self._id[kind]
-        self._workers[kind].submit((rid, text))
+        snapshot = [dict(message) for message in messages] if messages is not None else None
+        self._workers[kind].submit((rid, text, snapshot))
 
     def cancel(self, *kinds: str) -> None:
         with self._id_lock:
-            self._id.update({k: -1 for k in kinds})  # 排队中的全部失效
+            for kind in kinds:
+                self._id[kind] += 1  # 单调递增，不能重置到预热专用 id=0。
         for k in kinds:
             self._workers[k].cancel()
 
@@ -321,9 +353,11 @@ class LlmClient(QObject):
         """启动预热与 25min 保活：一条 num_predict=1 的请求消化冷启动。"""
         self._wants_warmup = True
         # warmup 用 id=0 排队执行；真实请求（id>=1）到来时它自动让位
-        self._workers["translate"].submit((_PREHEAT_ID, None))
+        self._workers["translate"].submit((_PREHEAT_ID, None, None))
 
     def close(self) -> None:
+        self._wants_warmup = False
+        self.cancel(*self._workers)
         for w in self._workers.values():
             w.cancel()
             w.submit(_SHUTDOWN)

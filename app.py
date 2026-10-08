@@ -24,23 +24,31 @@ except Exception:  # noqa: BLE001 — 老系统无此 API，Qt 自会兜底
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
 import urllib.request
+import urllib.parse
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
+import win32gui
 
 import capture
 import llm
+import startup
+from conversation import CHAT_PROMPT, build_messages
+from instance import SingleInstance
 from popup import (
     ICON_SIZE,
     PopupWindow,
     Toast,
     TrayIcon,
+    StatusWindow,
     app_theme_qss,
     logical_from_physical,
 )
@@ -57,6 +65,8 @@ DEFAULTS = {
     "model": "qwen3-vl:30b-a3b-instruct",
     "keep_alive": "30m",
     "prefetch_explain": False,
+    "show_startup_window": False,
+    "auto_start_ollama": True,
     "max_text_len": 3000,
     "debounce_ms": 150,
     "icon_timeout_s": 3,
@@ -65,6 +75,7 @@ DEFAULTS = {
         "explain": "<ctrl>+<alt>+e",
     },
     "prompts": {
+        "chat": CHAT_PROMPT,
         "translate": "你是划词翻译引擎。自动识别语言：非中文译为中文，中文译为英文。"
                       "只输出译文，保留换行与格式，不要任何解释。",
         "explain": "解释用户划选的文本。若是专有名词/术语/缩写：给出全称与通行中文名、所属领域、"
@@ -144,6 +155,10 @@ class App(QObject):
         self._sel: capture.Selection | None = None
         self._icon_anchor: tuple[int, int] = (0, 0)
         self._last_attempt: tuple[int, int] | None = None
+        self._chat_history: list[dict[str, str]] = []
+        self._chat_pending_question: str | None = None
+        self._last_question: str | None = None
+        self._ollama_start_attempted = False
 
         self.bridge = CaptureBridge(self)
         self.worker = capture.CaptureWorker(cfg, emit_result=self.bridge.captured.emit)
@@ -152,9 +167,15 @@ class App(QObject):
         self.icon = IconWindow(cfg)
         self.popup = PopupWindow(cfg)
         self.toast = Toast()
+        self.status = StatusWindow()
+        self.status.test_requested.connect(self.test_translation)
+        self.status.quit_requested.connect(self.quit)
         self.tray = TrayIcon(actions={
+            "show_status": self.status.show_status,
             "pause": self.toggle_pause,
             "open_config": self.open_config_file,
+            "autostart_enabled": startup.is_enabled(),
+            "set_autostart": self.set_autostart,
             "exit": self.quit,
         }, parent=self)
 
@@ -162,6 +183,8 @@ class App(QObject):
         self._debounce.timeout.connect(self._fire_debounced)
         self._keepalive = QTimer(self, interval=25 * 60 * 1000)
         self._keepalive.timeout.connect(self.llm.preheat)
+        self._startup_retry = QTimer(self, singleShot=True, interval=15000)
+        self._startup_retry.timeout.connect(self._startup)
 
         self.monitor.selection_attempt.connect(self.on_attempt)
         self.monitor.hotkey.connect(self.on_hotkey)
@@ -172,9 +195,11 @@ class App(QObject):
         self.popup.switch_requested.connect(self.on_switched)
         self.popup.retry_requested.connect(self.on_retry)
         self.popup.close_requested.connect(self.close_popup)
+        self.popup.question_submitted.connect(self.on_question)
         self.llm.chunk.connect(self.on_chunk)
         self.llm.finished.connect(self.on_finished)
         self.llm.failed.connect(self.on_failed)
+        self.llm.warmup_finished.connect(self.on_warmup_finished)
 
     # —— 启动 / 退出
 
@@ -183,13 +208,16 @@ class App(QObject):
         self.tray.show()
         self.worker.start()
         self.monitor.start()
+        if self._cfg.get("show_startup_window", False):
+            self.status.show_status()
         QTimer.singleShot(0, self._startup)
 
     def _startup(self) -> None:
-        self.llm.preheat()  # 启动即预热，消化冷启动
-        self._keepalive.start()
+        if not self._keepalive.isActive():
+            self._keepalive.start()
         checker = OllamaChecker(self)
         checker.checked.connect(self._on_ollama_checked)
+        checker.checked.connect(checker.deleteLater)
         threading.Thread(target=lambda: checker.checked.emit(self._probe_ollama()),
                          name="ollama-check", daemon=True).start()
         log.info("划译已启动（model=%s）", self._cfg["model"])
@@ -202,20 +230,61 @@ class App(QObject):
             return False
 
     def _on_ollama_checked(self, ok: bool) -> None:
+        if ok:
+            self._startup_retry.stop()
+            self.llm.preheat()
+        else:
+            self._start_local_ollama()
+            self.status.set_model_status(False, "等待本地翻译服务启动，将自动重试…")
+            self.tray.setToolTip("划译 — 等待 Ollama 启动")
+            self._startup_retry.start()
+
+    def _start_local_ollama(self) -> None:
+        if self._ollama_start_attempted or not self._cfg.get("auto_start_ollama", True):
+            return
+        address = urllib.parse.urlparse(self._cfg["base_url"])
+        if address.hostname not in ("localhost", "127.0.0.1", "::1") or address.port != 11434:
+            return
+        self._ollama_start_attempted = True
+        executable = shutil.which("ollama")
+        if not executable:
+            candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+            if candidate.exists():
+                executable = str(candidate)
+        if not executable:
+            log.warning("未找到 Ollama，等待用户启动本地服务")
+            return
+        try:
+            with (APP_DIR / "ollama.log").open("a", encoding="utf-8") as output:
+                subprocess.Popen(
+                    [executable, "serve"], cwd=APP_DIR, stdout=output, stderr=output,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            log.info("已在后台启动本地 Ollama 服务")
+        except OSError:
+            log.exception("后台启动 Ollama 失败")
+
+    def on_warmup_finished(self, ok: bool, message: str) -> None:
+        self.status.set_model_status(ok, message)
+        self.tray.setToolTip("划译 — 本地模型已就绪" if ok else "划译 — 本地模型暂不可用")
         if not ok:
-            self.tray.showMessage(
-                "划译",
-                "Ollama 服务不可达，请先启动 `ollama serve`",
-                QSystemTrayIcon.MessageIcon.Warning,
-                timeout=4000,
-            )
+            self._startup_retry.start()
+
+    def test_translation(self) -> None:
+        self.close_popup()
+        self._sel = capture.Selection(text="The battery stores energy.", source="demo")
+        x, y = cursor_physical()
+        self._icon_anchor = (x + 12, y + 12)
+        self._open_popup("translate")
 
     def quit(self) -> None:
         log.info("退出划译")
         try:
             self.monitor.stop()
             self.worker.stop()
-            self.llm.cancel("translate", "explain")
+            self._startup_retry.stop()
+            self._keepalive.stop()
+            self.llm.cancel("translate", "explain", "chat")
             self.llm.close()
         finally:
             QApplication.instance().quit()
@@ -224,6 +293,7 @@ class App(QObject):
 
     def toggle_pause(self) -> None:
         self._paused = not self._paused
+        self.status.listener_status.setText("监听已暂停" if self._paused else "监听已开启")
         self.tray.set_paused(self._paused)
         x, y = cursor_physical()
         self.toast.show_at(x, y, "已暂停监听" if self._paused else "已恢复监听")
@@ -233,11 +303,29 @@ class App(QObject):
     def open_config_file(self) -> None:
         os.startfile(CONFIG_PATH)  # noqa: S606 — 用户托盘操作
 
+    def set_autostart(self, enabled: bool) -> None:
+        try:
+            startup.set_enabled(enabled)
+            log.info("开机自启动：%s", enabled)
+        except Exception:
+            log.exception("修改开机自启动失败")
+            self.tray.act_autostart.blockSignals(True)
+            self.tray.act_autostart.setChecked(startup.is_enabled())
+            self.tray.act_autostart.blockSignals(False)
+            self.tray.showMessage("划译", "开机自启动设置失败，请查看日志。")
+
+    def _inside_own_ui(self, phys: tuple[int, int]) -> bool:
+        lx, ly, _ = logical_from_physical(*phys)
+        return any(window.isVisible() and window.frameGeometry().contains(int(lx), int(ly))
+                   for window in (self.popup, self.status, self.icon, self.toast))
+
     # —— 触发路径
 
     def on_attempt(self, info: dict) -> None:
         """划选候选（拖选松开/双击/三击）：防抖后再取词。"""
         if self._paused:
+            return
+        if self._inside_own_ui(info["phys"]) or (self.popup.isVisible() and self.popup.is_pinned()):
             return
         self._last_attempt = info["phys"]
         self._debounce.start()
@@ -245,6 +333,8 @@ class App(QObject):
     def _fire_debounced(self) -> None:
         phys = self._last_attempt or cursor_physical()
         self._last_attempt = None
+        if self._paused or self._inside_own_ui(phys) or (self.popup.isVisible() and self.popup.is_pinned()):
+            return
         self.icon.hide()  # 新候选：浮标先收，等取词成功再浮
         self.worker.submit("silent", "icon", phys, int(self._cfg["max_text_len"]))
 
@@ -253,6 +343,13 @@ class App(QObject):
         if self._paused:
             return
         phys = cursor_physical()
+        foreground_pid = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(
+            win32gui.GetForegroundWindow(), ctypes.byref(foreground_pid)
+        )
+        if foreground_pid.value == os.getpid():
+            return
+        self._debounce.stop()
         self.worker.submit("explicit", kind, phys, int(self._cfg["max_text_len"]))
 
     def on_captured(self, payload: dict) -> None:
@@ -261,6 +358,8 @@ class App(QObject):
         purpose = req["purpose"]
 
         if purpose == "icon":
+            if self.popup.isVisible() and self.popup.is_pinned():
+                return  # 固定的阅读/追问内容不被其他应用中的拖选覆盖。
             if sel is None:
                 self.icon.hide()  # 防误触核心：取不到就不出现任何 UI
                 return
@@ -282,7 +381,7 @@ class App(QObject):
             return
         self._sel = sel
         if self.popup.isVisible():
-            self.llm.cancel("translate", "explain")
+            self.llm.cancel("translate", "explain", "chat")
         if sel.rect:
             self._icon_anchor = (sel.rect[0] + sel.rect[2] + 8, sel.rect[1] + sel.rect[3] + 8)
         else:
@@ -299,13 +398,18 @@ class App(QObject):
         sel = self._sel
         if sel is None:
             return
+        self.icon.hide()
+        self.llm.cancel("translate", "explain", "chat")
+        self._chat_history.clear()
+        self._chat_pending_question = None
+        self._last_question = None
         ax, ay = self._icon_anchor
         self.popup.open_at(
             ax - 12, ay + ICON_SIZE + 12, sel.text, sel.truncated, initial_kind=kind,
         )
         self.llm.request(kind, sel.text)
         self.popup.mark_pending(kind, t0=time.perf_counter())
-        log.debug("弹窗打开（kind=%s, source=%s）", kind, sel.source)
+        log.info("弹窗打开（kind=%s, source=%s）", kind, sel.source)
 
     def on_switched(self, kind: str) -> None:
         """首次切到某标签（惰性请求解释）。"""
@@ -317,13 +421,36 @@ class App(QObject):
     def on_retry(self, kind: str) -> None:
         if self._sel is None:
             return
+        if kind == "chat":
+            if self._last_question:
+                self._start_question(self._last_question, retry=True)
+            return
+        self.popup.reset_result(kind)
         self.llm.request(kind, self._sel.text)
         self.popup.mark_pending(kind, t0=time.perf_counter())
+
+    def on_question(self, question: str) -> None:
+        self._start_question(question)
+
+    def _start_question(self, question: str, retry: bool = False) -> None:
+        if self._sel is None or self._chat_pending_question is not None or not question.strip():
+            return
+        question = question.strip()[:2000]
+        messages = build_messages(
+            self._cfg, self._sel.text, self.popup.result_text("translate"),
+            self.popup.result_text("explain"), self._chat_history, question,
+        )
+        self._last_question = question
+        self._chat_pending_question = question
+        self.popup.begin_question(question, retry=retry)
+        self.popup.mark_pending("chat", t0=time.perf_counter())
+        self.llm.request("chat", question, messages=messages)
+        log.info("追问请求已发送（history_turns=%s）", len(self._chat_history) // 2)
 
     # —— 关闭/取消
 
     def on_esc(self) -> None:
-        if self.popup.isVisible():
+        if self.popup.isVisible() and not self.popup.is_pinned():
             self.close_popup()
         self.icon.hide()
 
@@ -338,13 +465,14 @@ class App(QObject):
             ig = self.icon.frameGeometry()
             if ig.contains(int(lx), int(ly)):
                 return  # 点击的是浮标本体 → 由浮标自己的处理
-        if self.popup.isVisible():
+        if self.popup.isVisible() and not self.popup.is_pinned():
             self.close_popup()
         self.icon.hide()
 
     def close_popup(self) -> None:
         self.popup.close_now()
-        self.llm.cancel("translate", "explain")
+        self.llm.cancel("translate", "explain", "chat")
+        self._chat_pending_question = None
 
     # —— LLM 信号 → 弹窗
 
@@ -353,10 +481,23 @@ class App(QObject):
             self.popup.append_chunk(kind, delta)
 
     def on_finished(self, kind: str, full_text: str) -> None:
+        self._startup_retry.stop()
+        self.status.set_model_status(True, "本地模型已就绪，可以划词翻译。")
+        self.tray.setToolTip("划译 — 本地模型已就绪")
+        if kind == "chat" and self._chat_pending_question is not None:
+            self._chat_history.extend([
+                {"role": "user", "content": self._chat_pending_question},
+                {"role": "assistant", "content": full_text},
+            ])
+            self._chat_history = self._chat_history[-24:]
+            self._chat_pending_question = None
+        log.info("翻译请求完成（kind=%s, chars=%s）", kind, len(full_text))
         if self.popup.isVisible():
             self.popup.mark_done(kind)
 
     def on_failed(self, kind: str, msg: str) -> None:
+        if kind == "chat":
+            self._chat_pending_question = None
         if self.popup.isVisible():
             self.popup.mark_failed(kind, msg)
 
@@ -374,10 +515,24 @@ def main() -> None:
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("划译")
 
+    instance = SingleInstance(APP_DIR, app)
+    if not instance.acquire():
+        log.info("划译已在后台运行")
+        return
     controller = App(cfg)
+    instance.activated.connect(lambda: log.info("忽略重复启动，保留当前后台实例"))
+    app.aboutToQuit.connect(instance.close)
     controller.start()
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("划译启动失败")
+        # pythonw 没有控制台；启动异常必须能让桌面用户看见。
+        ctypes.windll.user32.MessageBoxW(
+            None, f"划译启动失败，请查看日志：\n{LOG_PATH}", "划译", 0x10
+        )
+        raise

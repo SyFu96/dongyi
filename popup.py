@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """M4 弹窗 + 托盘 + Toast，以及物理像素坐标换算、主题样式工具。
 
-关键点（坑 7/8）：
-- 物理像素（UIA/钩子）↔ Qt 逻辑像素经 devicePixelRatio 显式换算。
-- 无边框置顶不抢焦点窗口收不到键盘事件：文本不自选，复制靠按钮，Esc 走全局钩子。
+物理像素与 Qt 逻辑像素显式换算；结果展示时不抢焦点，追问时可主动输入。
 """
 
 from __future__ import annotations
@@ -17,6 +15,8 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSystemTrayIcon,
@@ -48,6 +48,8 @@ QPushButton#retryBtn { color: #8ecbf5; }
 QMenu { background: #25292e; color: #d5dade; border: 1px solid #3a3f45; }
 QMenu::item { padding: 4px 24px; }
 QMenu::item:selected { background: #363d45; }
+QLineEdit, QPlainTextEdit { background: #25292e; color: #d5dade; border: 1px solid #40464d; border-radius: 4px; padding: 5px; }
+QToolButton:checked { background: #245779; color: #e4f4ff; }
 #sourceText { color: #eceff2; }
 #statusLabel { color: #7f8992; }
 #truncBanner { color: #ffb74d; }
@@ -70,6 +72,8 @@ QPushButton#retryBtn { color: #0b62c4; }
 QMenu { background: #ffffff; color: #20242a; border: 1px solid #b9bec5; }
 QMenu::item { padding: 4px 24px; }
 QMenu::item:selected { background: #dfe3e8; }
+QLineEdit, QPlainTextEdit { background: #ffffff; color: #20242a; border: 1px solid #b9bec5; border-radius: 4px; padding: 5px; }
+QToolButton:checked { background: #c9e5fa; color: #174d76; }
 #sourceText { color: #14171a; }
 #statusLabel { color: #72797f; }
 #truncBanner { color: #b26a00; }
@@ -197,23 +201,61 @@ class Toast(_NoFocusWindow):
 # ---------------------------------------------------------------- 弹窗
 
 
-class PopupWindow(QWidget):
-    """译文/解释双标签弹窗（无边框、置顶、不抢焦点、流式渲染）。"""
+class DragHandle(QLabel):
+    """只在标题区域拖动窗口，不影响译文选字、按钮或追问输入。"""
 
-    KINDS = ("translate", "explain")
-    TAB_TITLES = {"translate": "译文", "explain": "解释"}
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__("划译 · 拖动这里移动窗口", parent)
+        self.setObjectName("statusLabel")
+        self.setCursor(Qt.SizeAllCursor)
+        self.setMinimumHeight(22)
+        self._press_global = None
+        self._window_start = None
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._press_global = event.globalPosition().toPoint()
+            self._window_start = self.window().pos()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press_global is not None and event.buttons() & Qt.LeftButton:
+            delta = event.globalPosition().toPoint() - self._press_global
+            self.window().move(self._window_start + delta)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self._press_global is not None:
+            self._press_global = None
+            self._window_start = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+
+class PopupWindow(QWidget):
+    """译文、解释、追问弹窗，支持保持在最前与流式渲染。"""
+
+    KINDS = ("translate", "explain", "chat")
+    TAB_TITLES = {"translate": "译文", "explain": "解释", "chat": "追问"}
 
     switch_requested = Signal(str)  # 首次切到某标签需要发起请求
     retry_requested = Signal(str)
     close_requested = Signal()
+    question_submitted = Signal(str)
 
     def __init__(self, cfg: dict) -> None:
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
+        # 展示不抢焦点；用户点击窗口后可主动输入追问。
 
         popup = cfg.get("popup", {}) or {}
-        self.setFixedSize(int(popup.get("width", 460)), int(popup.get("height", 320)))
+        self.resize(int(popup.get("width", 460)), int(popup.get("height", 320)))
+        self.setMinimumSize(420, 320)
         self._max_text_len = int(cfg.get("max_text_len", 3000))
 
         self._source_text = ""
@@ -227,6 +269,9 @@ class PopupWindow(QWidget):
         self._t0: dict[str, float] = {}
         self._requested: set[str] = set()
         self._collapsed = True
+        self._pinned = False
+        self._chat_busy = False
+        self._chat_turns: list[list[str]] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -241,9 +286,12 @@ class PopupWindow(QWidget):
         # —— 头部：原文 + 按钮
         head = QVBoxLayout()
         head.setSpacing(4)
+        self.drag_handle = DragHandle(self)
+        head.addWidget(self.drag_handle)
         self.lbl_source = QLabel("")
         self.lbl_source.setObjectName("sourceText")
         self.lbl_source.setWordWrap(True)
+        self.lbl_source.setTextFormat(Qt.PlainText)
         self.lbl_source.setTextInteractionFlags(Qt.NoTextInteraction)
         head.addWidget(self.lbl_source)
 
@@ -262,6 +310,12 @@ class PopupWindow(QWidget):
         self.btn_copy_src.setText("复制原文")
         self.btn_copy_src.clicked.connect(self._copy_source)
         hrow.addWidget(self.btn_copy_src)
+        self.btn_pin = QToolButton()
+        self.btn_pin.setText("显示在最前")
+        self.btn_pin.setCheckable(True)
+        self.btn_pin.setToolTip("保持结果窗口；点击其他应用和按 Esc 都不会关闭，点击 × 关闭。")
+        self.btn_pin.toggled.connect(self._set_pinned)
+        hrow.addWidget(self.btn_pin)
         self.btn_close = QToolButton()
         self.btn_close.setText("\u2715")
         self.btn_close.clicked.connect(self.close_requested.emit)
@@ -273,7 +327,8 @@ class PopupWindow(QWidget):
         self.tabs = QTabWidget()
         tabs_holder = self.tabs
         for i, kind in enumerate(self.KINDS):
-            tabs_holder.addTab(self._make_page(kind), self.TAB_TITLES[kind])
+            page = self._make_chat_page() if kind == "chat" else self._make_page(kind)
+            tabs_holder.addTab(page, self.TAB_TITLES[kind])
         tabs_holder.currentChanged.connect(self._on_tab_changed)
         fv.addWidget(tabs_holder, 1)
 
@@ -291,6 +346,8 @@ class PopupWindow(QWidget):
         scroll.setWidgetResizable(True)
         content = QLabel("")
         content.setWordWrap(True)
+        content.setTextFormat(Qt.PlainText)
+        content.setTextInteractionFlags(Qt.TextSelectableByMouse)
         content.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         scroll.setWidget(content)
         self._scrolls[kind] = scroll
@@ -320,6 +377,81 @@ class PopupWindow(QWidget):
         v.addLayout(brow)
         return page
 
+    def _make_chat_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 6)
+        self.chat_view = QPlainTextEdit()
+        self.chat_view.setReadOnly(True)
+        self.chat_view.setPlaceholderText("可以继续问：为什么这样翻译？能举个例子吗？\n追问会结合原文、译文和解释。")
+        self._scrolls["chat"] = self.chat_view
+        layout.addWidget(self.chat_view, 1)
+        status_row = QHBoxLayout()
+        status = QLabel("")
+        status.setObjectName("statusLabel")
+        status_row.addWidget(status, 1)
+        self._statuses["chat"] = status
+        retry = QPushButton("重试")
+        retry.setVisible(False)
+        retry.clicked.connect(lambda: self.retry_requested.emit("chat"))
+        self._retries["chat"] = retry
+        status_row.addWidget(retry)
+        layout.addLayout(status_row)
+        input_row = QHBoxLayout()
+        self.question_input = QLineEdit()
+        self.question_input.setPlaceholderText("接着问…（Enter 发送）")
+        self.question_input.setMaxLength(2000)
+        self.question_input.returnPressed.connect(self._submit_question)
+        input_row.addWidget(self.question_input, 1)
+        self.btn_send = QPushButton("发送")
+        self.btn_send.clicked.connect(self._submit_question)
+        input_row.addWidget(self.btn_send)
+        layout.addLayout(input_row)
+        copy = QPushButton("复制对话")
+        copy.clicked.connect(lambda: self._copy_page("chat"))
+        layout.addWidget(copy)
+        return page
+
+    def _set_pinned(self, pinned: bool) -> None:
+        self._pinned = pinned
+        self.btn_pin.setText("已置顶" if pinned else "显示在最前")
+
+    def is_pinned(self) -> bool:
+        return self._pinned
+
+    def _submit_question(self) -> None:
+        question = self.question_input.text().strip()
+        if not question or self._chat_busy:
+            return
+        self.question_input.clear()
+        self.question_submitted.emit(question)
+
+    def begin_question(self, question: str, retry: bool = False) -> None:
+        self.btn_pin.setChecked(True)
+        self._texts["chat"] = ""
+        self._bufs["chat"].clear()
+        if not retry or not self._chat_turns:
+            self._chat_turns.append([question, ""])
+        else:
+            self._chat_turns[-1][1] = ""
+        self._render_chat()
+        self.chat_view.verticalScrollBar().setValue(self.chat_view.verticalScrollBar().maximum())
+
+    def _render_chat(self) -> None:
+        self.chat_view.setPlainText("\n\n".join(
+            f"你：{question}\n\n划译：{answer}" for question, answer in self._chat_turns
+        ))
+
+    def result_text(self, kind: str) -> str:
+        self._flush()
+        return self._texts.get(kind, "")
+
+    def reset_result(self, kind: str) -> None:
+        self._texts[kind] = ""
+        self._bufs[kind].clear()
+        if kind != "chat":
+            self._labels[kind].clear()
+
     # —— 对外 API（app 调用 / llm 信号接入）
 
     def open_at(self, phys_x: float, phys_y: float, text: str, truncated: bool,
@@ -332,6 +464,11 @@ class PopupWindow(QWidget):
         self._requested = {initial_kind}
         self._t0.clear()
         self._collapsed = True
+        self._chat_turns.clear()
+        self._chat_busy = False
+        self.btn_send.setEnabled(True)
+        self.question_input.clear()
+        self.chat_view.clear()
 
         self.lbl_source.setText(text)
         self.lbl_source.setMaximumHeight(16777215)
@@ -340,7 +477,8 @@ class PopupWindow(QWidget):
         self.lbl_trunc.setVisible(truncated)
 
         for k in self.KINDS:
-            self._labels[k].setText("")
+            if k != "chat":
+                self._labels[k].setText("")
             self._statuses[k].setText("请求中…" if k == initial_kind else "")
             self._statuses[k].setStyleSheet("")
             self._retries[k].setVisible(False)
@@ -362,6 +500,9 @@ class PopupWindow(QWidget):
         self._statuses[kind].setStyleSheet("")
         self._retries[kind].setVisible(False)
         self._requested.add(kind)
+        if kind == "chat":
+            self._chat_busy = True
+            self.btn_send.setEnabled(False)
         if t0 is not None:
             self._t0[kind] = t0
 
@@ -369,6 +510,10 @@ class PopupWindow(QWidget):
         self._bufs.get(kind, []).append(delta)
 
     def mark_done(self, kind: str) -> None:
+        self._flush()
+        if kind == "chat":
+            self._chat_busy = False
+            self.btn_send.setEnabled(True)
         t0 = self._t0.get(kind)
         if t0 is not None:
             self._statuses[kind].setText(f"完成（{time.perf_counter() - t0:.1f}s）")
@@ -376,6 +521,9 @@ class PopupWindow(QWidget):
             self._statuses[kind].setText("完成")
 
     def mark_failed(self, kind: str, msg: str) -> None:
+        if kind == "chat":
+            self._chat_busy = False
+            self.btn_send.setEnabled(True)
         self._statuses[kind].setText(msg)
         self._statuses[kind].setStyleSheet("color:#ff8a80;")
         self._retries[kind].setVisible(True)
@@ -391,6 +539,12 @@ class PopupWindow(QWidget):
 
     def _on_tab_changed(self, idx: int) -> None:
         kind = self.KINDS[idx]
+        if kind == "chat":
+            self.btn_pin.setChecked(True)
+            self.resize(self.width(), max(self.height(), 460))
+            self.activateWindow()
+            self.question_input.setFocus(Qt.OtherFocusReason)
+            return
         if kind not in self._requested:
             self._requested.add(kind)
             self.switch_requested.emit(kind)
@@ -402,12 +556,20 @@ class PopupWindow(QWidget):
                 continue
             scroll = self._scrolls[kind]
             bar = scroll.verticalScrollBar()
+            previous_value = bar.value()
             stick = bar.maximum() == 0 or bar.value() >= bar.maximum() - 40
             self._texts[kind] += "".join(buf)
             buf.clear()
-            self._labels[kind].setText(self._texts[kind])
+            if kind == "chat":
+                if self._chat_turns:
+                    self._chat_turns[-1][1] = self._texts[kind]
+                self._render_chat()
+            else:
+                self._labels[kind].setText(self._texts[kind])
             if stick:
                 bar.setValue(bar.maximum())
+            else:
+                bar.setValue(previous_value)
 
     def _apply_collapse(self) -> None:
         """原文 >3 行（约 >200 字符）时默认折叠，提供展开/收起。"""
@@ -426,7 +588,9 @@ class PopupWindow(QWidget):
         QApplication.clipboard().setText(self._source_text)
 
     def _copy_page(self, kind: str) -> None:
-        QApplication.clipboard().setText(self._texts[kind])
+        self._flush()
+        text = self.chat_view.toPlainText() if kind == "chat" else self._texts[kind]
+        QApplication.clipboard().setText(text)
 
 
 # ---------------------------------------------------------------- 托盘
@@ -438,12 +602,22 @@ class TrayIcon(QSystemTrayIcon):
     def __init__(self, actions: dict, parent=None) -> None:
         super().__init__(self._make_icon(), parent)
         self.setToolTip("划译 — 本地划词翻译")
+        self.activated.connect(
+            lambda reason: actions["show_status"]()
+            if reason in (self.ActivationReason.Trigger, self.ActivationReason.DoubleClick)
+            else None
+        )
 
         menu = QMenu()
         menu.setStyleSheet(DARK_QSS)
+        menu.addAction("状态与测试").triggered.connect(actions["show_status"])
         self.act_pause = menu.addAction("暂停监听")
         self.act_pause.triggered.connect(actions["pause"])
         menu.addAction("打开配置文件").triggered.connect(actions["open_config"])
+        self.act_autostart = menu.addAction("开机自启动")
+        self.act_autostart.setCheckable(True)
+        self.act_autostart.setChecked(actions.get("autostart_enabled", False))
+        self.act_autostart.toggled.connect(actions["set_autostart"])
         menu.addSeparator()
         menu.addAction("退出").triggered.connect(actions["exit"])
         self.setContextMenu(menu)
@@ -465,3 +639,65 @@ class TrayIcon(QSystemTrayIcon):
         p.drawText(pm.rect(), Qt.AlignCenter, "译")
         p.end()
         return QIcon(pm)
+
+
+class StatusWindow(QWidget):
+    """可见的启动入口；关闭窗口后继续在托盘运行。"""
+
+    test_requested = Signal()
+    quit_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("划译 — 本地划词翻译")
+        self.setWindowIcon(TrayIcon._make_icon())
+        self.setObjectName("popupRoot")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+        title = QLabel("划译已启动")
+        title.setStyleSheet("font-size:18pt;font-weight:bold;")
+        layout.addWidget(title)
+        self.listener_status = QLabel("监听已开启")
+        layout.addWidget(self.listener_status)
+        self.model_status = QLabel("正在连接并预热本地模型，首次可能需要约 30 秒…")
+        self.model_status.setWordWrap(True)
+        layout.addWidget(self.model_status)
+        instructions = QLabel(
+            "使用方法：\n"
+            "在其他应用里选中文字，点击选区旁的「译」。\n"
+            "也可以选中文字后按 Ctrl+Alt+T 翻译，或 Ctrl+Alt+E 解释。\n\n"
+            "工具启动后安静地在后台运行。右键托盘图标可查看状态、设置开机自启动或退出。"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        layout.addWidget(QLabel("测试句：The battery stores energy."))
+        buttons = QHBoxLayout()
+        test = QPushButton("测试翻译")
+        test.clicked.connect(self.test_requested.emit)
+        buttons.addWidget(test)
+        buttons.addStretch()
+        background = QPushButton("后台运行")
+        background.clicked.connect(self.hide)
+        buttons.addWidget(background)
+        exit_button = QPushButton("退出")
+        exit_button.clicked.connect(self.quit_requested.emit)
+        buttons.addWidget(exit_button)
+        layout.addLayout(buttons)
+
+    def show_status(self) -> None:
+        # 无控制台快捷方式可能携带 SW_HIDE；重新显示可恢复原生窗口可见状态。
+        self.hide()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        log.info("打开划译启动窗口")
+
+    def set_model_status(self, ok: bool, message: str) -> None:
+        self.model_status.setText(message)
+        self.model_status.setStyleSheet("color:#8ecbf5;" if ok else "color:#ff8a80;")
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        event.ignore()
+        self.hide()

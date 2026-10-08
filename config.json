@@ -3,6 +3,8 @@
   "model": "qwen3-vl:30b-a3b-instruct",
   "keep_alive": "30m",
   "prefetch_explain": false,
+  "show_startup_window": false,
+  "auto_start_ollama": true,
   "max_text_len": 3000,
   "debounce_ms": 150,
   "icon_timeout_s": 3,

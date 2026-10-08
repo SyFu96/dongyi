@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import ctypes
 import math
 import time
 
@@ -22,6 +23,18 @@ log = logging.getLogger(__name__)
 DRAG_MIN_PX = 12      # 拖选判定：位移 ≥ 12 物理像素
 CLICK_MAX_PX = 6      # 多击判定：位移 < 6px
 MAX_CLICK_GAP = 0.4   # 多击判定：距上次 < 400ms
+
+_MODIFIER_VKS = {
+    Key.ctrl: (0x11,),
+    Key.alt: (0x12,),
+    Key.shift: (0x10,),
+    Key.cmd: (0x5B, 0x5C),
+}
+
+
+def _modifier_is_down(key: Key) -> bool:
+    return any(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000
+               for vk in _MODIFIER_VKS[key])
 
 
 class Monitor(QObject):
@@ -98,11 +111,28 @@ class _KeyListener(GlobalHotKeys):
 
     def __init__(self, owner: Monitor, hotkeys: dict) -> None:
         self._owner = owner
-        super().__init__(hotkeys)
+        guarded = {}
+        for description, callback in hotkeys.items():
+            required = tuple(key for key in HotKey.parse(description) if key in _MODIFIER_VKS)
+
+            def activate(action=callback, modifiers=required):
+                # 状态机可能遗漏抬键事件；不能仅凭其记忆把单个 E/T 当成热键。
+                if all(_modifier_is_down(key) for key in modifiers):
+                    action()
+
+            guarded[description] = activate
+        super().__init__(guarded)
 
     def _on_press(self, key, injected) -> None:
+        if injected:
+            return
+        # 用系统当前状态淘汰残留修饰键，让后续真正的完整组合仍可正常触发。
+        for modifier in _MODIFIER_VKS:
+            if not _modifier_is_down(modifier):
+                for hotkey in self._hotkeys:
+                    hotkey.release(modifier)
         try:
-            if not injected and key == Key.esc:
+            if key == Key.esc:
                 self._owner.esc.emit()
         except Exception:  # noqa: BLE001
             log.exception("Esc 事件处理失败")
