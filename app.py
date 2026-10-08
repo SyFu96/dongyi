@@ -9,6 +9,18 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+
+# 必须在 import capture（触发 uiautomation 导入）之前把进程 DPI 感知设为
+# Per-Monitor V2：uiautomation 导入时会用 shcore.SetProcessDpiAwareness 抢先
+# 占用进程感知，Qt 启动时再设就会失败并打
+# "SetProcessDpiAwarenessContext() failed" 警告，多屏缩放换算也可能失准。
+try:
+    _user32 = ctypes.windll.user32
+    _user32.SetProcessDpiAwarenessContext.restype = ctypes.c_void_p
+    _user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+except Exception:  # noqa: BLE001 — 老系统无此 API，Qt 自会兜底
+    pass
+
 import json
 import logging
 import os
