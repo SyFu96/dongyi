@@ -108,6 +108,10 @@ def stream_chat(
         raise _StreamAborted
     try:
         conn.request("POST", path, body=data, headers={"Content-Type": "application/json"})
+        # 用户可能在建立连接期间点击停止；此时取消线程还看不到 socket。
+        if cancelled is not None and cancelled():
+            conn.close()
+            raise _StreamAborted
         # TCP 连接用 3s 超时；请求已发出后，读响应放宽到 60s：
         # 首字节要等模型加载（冷启动可达 30s），不能被连接超时误杀
         if conn.sock is not None:
@@ -195,25 +199,30 @@ class _Worker(threading.Thread):
         with self._lock:
             self._cancel_requested = True
             conn = self._inflight
+            self._inflight = None
         if conn is not None:
-            try:
-                if conn.sock is not None:
-                    conn.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                conn.close()  # worker 正阻塞在 readline；断流 → 捕获 → 静默退出
-            except Exception:  # noqa: BLE001
-                pass
+            # close 可能等待读流锁；不能让停止按钮或新请求阻塞 GUI。
+            threading.Thread(target=self._abort_connection, args=(conn,),
+                             name=f"llm-cancel-{self._kind}", daemon=True).start()
+
+    @staticmethod
+    def _abort_connection(conn: http.client.HTTPConnection) -> None:
+        try:
+            if conn.sock is not None:
+                conn.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _attach_conn(self, conn: http.client.HTTPConnection) -> None:
         with self._lock:
             self._inflight = conn
-            if self._cancel_requested:
-                try:
-                    conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            cancelled = self._cancel_requested
+        if cancelled:
+            self._abort_connection(conn)
 
     def _is_current(self, req_id: int) -> bool:
         if req_id == _PREHEAT_ID:

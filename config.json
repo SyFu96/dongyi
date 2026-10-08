@@ -9,8 +9,8 @@
   "debounce_ms": 150,
   "icon_timeout_s": 3,
   "hotkeys": {
-    "translate": "<ctrl>+<alt>+t",
-    "explain": "<ctrl>+<alt>+e"
+    "translate": "<ctrl>+<alt>+<shift>+t",
+    "explain": "<ctrl>+<alt>+<shift>+e"
   },
   "prompts": {
     "translate": "你是划词翻译引擎。自动识别语言：非中文译为中文，中文译为英文。只输出译文，保留换行与格式，不要任何解释。",

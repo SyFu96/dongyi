@@ -71,8 +71,8 @@ DEFAULTS = {
     "debounce_ms": 150,
     "icon_timeout_s": 3,
     "hotkeys": {
-        "translate": "<ctrl>+<alt>+t",
-        "explain": "<ctrl>+<alt>+e",
+        "translate": "<ctrl>+<alt>+<shift>+t",
+        "explain": "<ctrl>+<alt>+<shift>+e",
     },
     "prompts": {
         "chat": CHAT_PROMPT,
@@ -153,6 +153,7 @@ class App(QObject):
         self._cfg = cfg
         self._paused = False
         self._sel: capture.Selection | None = None
+        self._icon_sel: capture.Selection | None = None
         self._icon_anchor: tuple[int, int] = (0, 0)
         self._last_attempt: tuple[int, int] | None = None
         self._chat_history: list[dict[str, str]] = []
@@ -194,6 +195,7 @@ class App(QObject):
         self.icon.clicked.connect(self.on_icon_clicked)
         self.popup.switch_requested.connect(self.on_switched)
         self.popup.retry_requested.connect(self.on_retry)
+        self.popup.stop_requested.connect(self.on_stop)
         self.popup.close_requested.connect(self.close_popup)
         self.popup.question_submitted.connect(self.on_question)
         self.llm.chunk.connect(self.on_chunk)
@@ -325,7 +327,7 @@ class App(QObject):
         """划选候选（拖选松开/双击/三击）：防抖后再取词。"""
         if self._paused:
             return
-        if self._inside_own_ui(info["phys"]) or (self.popup.isVisible() and self.popup.is_pinned()):
+        if self._inside_own_ui(info["phys"]):
             return
         self._last_attempt = info["phys"]
         self._debounce.start()
@@ -333,9 +335,10 @@ class App(QObject):
     def _fire_debounced(self) -> None:
         phys = self._last_attempt or cursor_physical()
         self._last_attempt = None
-        if self._paused or self._inside_own_ui(phys) or (self.popup.isVisible() and self.popup.is_pinned()):
+        if self._paused or self._inside_own_ui(phys):
             return
         self.icon.hide()  # 新候选：浮标先收，等取词成功再浮
+        self._icon_sel = None
         self.worker.submit("silent", "icon", phys, int(self._cfg["max_text_len"]))
 
     def on_hotkey(self, kind: str) -> None:
@@ -358,14 +361,12 @@ class App(QObject):
         purpose = req["purpose"]
 
         if purpose == "icon":
-            if self.popup.isVisible() and self.popup.is_pinned():
-                return  # 固定的阅读/追问内容不被其他应用中的拖选覆盖。
             if sel is None:
                 self.icon.hide()  # 防误触核心：取不到就不出现任何 UI
+                self._icon_sel = None
                 return
-            if self.popup.isVisible():
-                self.close_popup()  # 新划译：旧弹窗关闭 + 旧请求取消
-            self._sel = sel
+            # 候选选区与正在阅读/追问的原文分开；点击新“译”后才切换。
+            self._icon_sel = sel
             if sel.rect:
                 self._icon_anchor = (sel.rect[0] + sel.rect[2] + 8, sel.rect[1] + sel.rect[3] + 8)
             else:
@@ -390,8 +391,9 @@ class App(QObject):
         self._open_popup(kind=purpose)
 
     def on_icon_clicked(self) -> None:
-        if self._sel is None:
+        if self._icon_sel is None:
             return
+        self._sel = self._icon_sel
         self._open_popup(kind="translate")
 
     def _open_popup(self, kind: str) -> None:
@@ -399,6 +401,7 @@ class App(QObject):
         if sel is None:
             return
         self.icon.hide()
+        self._icon_sel = None
         self.llm.cancel("translate", "explain", "chat")
         self._chat_history.clear()
         self._chat_pending_question = None
@@ -448,6 +451,21 @@ class App(QObject):
         log.info("追问请求已发送（history_turns=%s）", len(self._chat_history) // 2)
 
     # —— 关闭/取消
+
+    def on_stop(self, kind: str) -> None:
+        if not self.popup.is_pending(kind):
+            return
+        self.llm.cancel(kind)
+        self.popup.mark_stopped(kind)
+        if kind == "chat" and self._chat_pending_question is not None:
+            partial = self.popup.result_text("chat")
+            self._chat_history.extend([
+                {"role": "user", "content": self._chat_pending_question},
+                {"role": "assistant", "content": partial + "\n[用户已停止生成，本轮回答未完成。]"},
+            ])
+            self._chat_history = self._chat_history[-24:]
+            self._chat_pending_question = None
+        log.info("用户停止生成（kind=%s）", kind)
 
     def on_esc(self) -> None:
         if self.popup.isVisible() and not self.popup.is_pinned():

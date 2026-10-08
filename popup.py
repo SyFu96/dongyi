@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizeGrip,
     QSystemTrayIcon,
     QTabWidget,
     QToolButton,
@@ -245,6 +246,7 @@ class PopupWindow(QWidget):
 
     switch_requested = Signal(str)  # 首次切到某标签需要发起请求
     retry_requested = Signal(str)
+    stop_requested = Signal(str)
     close_requested = Signal()
     question_submitted = Signal(str)
 
@@ -266,6 +268,8 @@ class PopupWindow(QWidget):
         self._scrolls: dict[str, QScrollArea] = {}
         self._statuses: dict[str, QLabel] = {}
         self._retries: dict[str, QPushButton] = {}
+        self._stops: dict[str, QPushButton] = {}
+        self._pending: set[str] = set()
         self._t0: dict[str, float] = {}
         self._requested: set[str] = set()
         self._collapsed = True
@@ -332,6 +336,17 @@ class PopupWindow(QWidget):
         tabs_holder.currentChanged.connect(self._on_tab_changed)
         fv.addWidget(tabs_holder, 1)
 
+        resize_row = QHBoxLayout()
+        resize_hint = QLabel("拖动右下角调整大小")
+        resize_hint.setObjectName("statusLabel")
+        resize_row.addWidget(resize_hint)
+        resize_row.addStretch(1)
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setFixedSize(20, 20)
+        self.size_grip.setToolTip("按住右下角，拖动调整窗口大小。")
+        resize_row.addWidget(self.size_grip, 0, Qt.AlignRight | Qt.AlignBottom)
+        fv.addLayout(resize_row)
+
         # —— 流式渲染：30ms 批量刷新
         self._flush_timer = QTimer(self, interval=30, timeout=self._flush)
         self._flush_timer.start()
@@ -359,6 +374,7 @@ class PopupWindow(QWidget):
         status = QLabel("")
         status.setObjectName("statusLabel")
         prow.addWidget(status, 1)
+        prow.addWidget(self._make_stop_button(kind))
         retry = QPushButton("重试")
         retry.setObjectName("retryBtn")
         retry.setVisible(False)
@@ -391,6 +407,7 @@ class PopupWindow(QWidget):
         status.setObjectName("statusLabel")
         status_row.addWidget(status, 1)
         self._statuses["chat"] = status
+        status_row.addWidget(self._make_stop_button("chat"))
         retry = QPushButton("重试")
         retry.setVisible(False)
         retry.clicked.connect(lambda: self.retry_requested.emit("chat"))
@@ -411,6 +428,17 @@ class PopupWindow(QWidget):
         copy.clicked.connect(lambda: self._copy_page("chat"))
         layout.addWidget(copy)
         return page
+
+    def _make_stop_button(self, kind: str) -> QPushButton:
+        button = QPushButton("停止")
+        button.setToolTip("终止本次生成，保留已经显示的内容。")
+        button.setVisible(False)
+        button.clicked.connect(lambda _=False: self.stop_requested.emit(kind))
+        self._stops[kind] = button
+        return button
+
+    def is_pending(self, kind: str) -> bool:
+        return kind in self._pending
 
     def _set_pinned(self, pinned: bool) -> None:
         self._pinned = pinned
@@ -462,6 +490,7 @@ class PopupWindow(QWidget):
         self._texts = {k: "" for k in self.KINDS}
         self._bufs = {k: [] for k in self.KINDS}
         self._requested = {initial_kind}
+        self._pending = {initial_kind}
         self._t0.clear()
         self._collapsed = True
         self._chat_turns.clear()
@@ -482,6 +511,7 @@ class PopupWindow(QWidget):
             self._statuses[k].setText("请求中…" if k == initial_kind else "")
             self._statuses[k].setStyleSheet("")
             self._retries[k].setVisible(False)
+            self._stops[k].setVisible(k == initial_kind)
             self._scrolls[k].verticalScrollBar().setValue(0)
         self.btn_expand.setText("\u25be 展开")
 
@@ -499,6 +529,9 @@ class PopupWindow(QWidget):
         self._statuses[kind].setText("请求中…")
         self._statuses[kind].setStyleSheet("")
         self._retries[kind].setVisible(False)
+        self._retries[kind].setText("重试")
+        self._pending.add(kind)
+        self._stops[kind].setVisible(True)
         self._requested.add(kind)
         if kind == "chat":
             self._chat_busy = True
@@ -511,6 +544,8 @@ class PopupWindow(QWidget):
 
     def mark_done(self, kind: str) -> None:
         self._flush()
+        self._pending.discard(kind)
+        self._stops[kind].setVisible(False)
         if kind == "chat":
             self._chat_busy = False
             self.btn_send.setEnabled(True)
@@ -521,6 +556,8 @@ class PopupWindow(QWidget):
             self._statuses[kind].setText("完成")
 
     def mark_failed(self, kind: str, msg: str) -> None:
+        self._pending.discard(kind)
+        self._stops[kind].setVisible(False)
         if kind == "chat":
             self._chat_busy = False
             self.btn_send.setEnabled(True)
@@ -529,10 +566,28 @@ class PopupWindow(QWidget):
         self._retries[kind].setVisible(True)
         self._flush()
 
+    def mark_stopped(self, kind: str) -> None:
+        self._flush()
+        self._pending.discard(kind)
+        self._t0.pop(kind, None)
+        self._stops[kind].setVisible(False)
+        self._statuses[kind].setText("已停止（保留已生成内容）")
+        self._statuses[kind].setStyleSheet("")
+        self._retries[kind].setText("重新生成")
+        self._retries[kind].setVisible(kind != "chat")
+        if kind == "chat":
+            self._chat_busy = False
+            self.btn_send.setEnabled(True)
+            if self.current_kind() == "chat":
+                self.question_input.setFocus(Qt.OtherFocusReason)
+
     def current_kind(self) -> str:
         return self.KINDS[self.tabs.currentIndex()]
 
     def close_now(self) -> None:
+        self._pending.clear()
+        for button in self._stops.values():
+            button.hide()
         self.hide()
 
     # —— 内部
@@ -667,7 +722,7 @@ class StatusWindow(QWidget):
         instructions = QLabel(
             "使用方法：\n"
             "在其他应用里选中文字，点击选区旁的「译」。\n"
-            "也可以选中文字后按 Ctrl+Alt+T 翻译，或 Ctrl+Alt+E 解释。\n\n"
+            "也可以选中文字后按 Ctrl+Alt+Shift+T 翻译，或 Ctrl+Alt+Shift+E 解释。\n\n"
             "工具启动后安静地在后台运行。右键托盘图标可查看状态、设置开机自启动或退出。"
         )
         instructions.setWordWrap(True)

@@ -9,6 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 from pynput.keyboard import Key, KeyCode
 
+import app as huayi
 import trigger
 from popup import PopupWindow
 
@@ -78,6 +79,31 @@ class HotkeyTests(unittest.TestCase):
         self.press(t)
         self.assertEqual(self.events.count(), 2)
 
+    def test_word_safe_defaults_require_shift_and_full_combo(self):
+        for letter, kind in (("t", "translate"), ("e", "explain")):
+            with self.subTest(kind=kind):
+                self.monitor = trigger.Monitor(huayi.DEFAULTS)
+                self.events = QSignalSpy(self.monitor.hotkey)
+                self.listener = self.monitor._keys
+                self.held = {Key.ctrl, Key.alt}
+                self.press(Key.ctrl)
+                self.press(Key.alt)
+                key = KeyCode.from_char(letter)
+                self.press(key)
+                self.release(key)
+                self.assertEqual(self.events.count(), 0)
+                self.held.add(Key.shift)
+                self.press(Key.shift)
+                self.press(key)
+                self.release(key)
+                self.assertEqual(self.events.count(), 1)
+                self.assertEqual(self.events.at(0), [kind])
+                # 遗漏 Shift 抬起时，旧的 Word 组合也不能误触发。
+                self.held.remove(Key.shift)
+                self.press(key)
+                self.release(key)
+                self.assertEqual(self.events.count(), 1)
+
 
 class DragTests(unittest.TestCase):
     @classmethod
@@ -110,6 +136,40 @@ class DragTests(unittest.TestCase):
                     self.assertTrue(window.isVisible())
                     self.assertEqual(window.result_text("translate"), "电池储存能量。")
                     self.assertEqual(window.tabs.currentIndex(), index)
+        finally:
+            window.hide()
+            window.deleteLater()
+
+    def test_corner_resize_works_on_all_tabs_and_keeps_size_on_reopen(self):
+        window = PopupWindow({})
+        try:
+            window.open_at(100, 100, "The battery stores energy.", False, "translate")
+            window.append_chunk("translate", "电池储存能量。")
+            window.mark_done("translate")
+            for index in range(3):
+                with self.subTest(tab=index):
+                    window.tabs.setCurrentIndex(index)
+                    QTest.qWait(10)
+                    original = window.size()
+                    grip = window.size_grip
+                    self.assertTrue(grip.isVisible())
+                    local = grip.rect().center()
+                    global_start = grip.mapToGlobal(local)
+                    delta = QPoint(70, 45)
+                    QTest.mousePress(grip, Qt.LeftButton, pos=local)
+                    move = QMouseEvent(QEvent.Type.MouseMove, QPointF(local + delta),
+                                       QPointF(global_start + delta), Qt.NoButton,
+                                       Qt.LeftButton, Qt.NoModifier)
+                    QApplication.sendEvent(grip, move)
+                    QTest.mouseRelease(grip, Qt.LeftButton, pos=local + delta)
+                    QTest.qWait(10)
+                    self.assertEqual(window.width(), original.width() + delta.x())
+                    self.assertEqual(window.height(), original.height() + delta.y())
+                    self.assertEqual(window.result_text("translate"), "电池储存能量。")
+            resized = window.size()
+            window.close_now()
+            window.open_at(100, 100, "Another text.", False, "translate")
+            self.assertEqual(window.size(), resized)
         finally:
             window.hide()
             window.deleteLater()
