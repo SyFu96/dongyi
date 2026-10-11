@@ -71,7 +71,7 @@
 
 ## 联网检索
 
-给「解释」和「追问」接入 [Ollama 托管搜索](https://docs.ollama.com/capabilities/web-search)：回答前先检索，再把结果作为上下文交给模型。**翻译标签不做检索**。
+给「解释」和「追问」接入 [Ollama 托管搜索](https://docs.ollama.com/capabilities/web-search)：回答前先检索，再把结果作为上下文交给模型。**翻译标签不做联网检索**；个人知识库的本地检索可单独开启，见 [DOMAINS.md](DOMAINS.md)。
 
 1. 到 [ollama.com/settings/keys](https://ollama.com/settings/keys) 建一个免费账号 API key；
 2. 填进 `web_search.api_key`（或设环境变量 `OLLAMA_API_KEY`）；
