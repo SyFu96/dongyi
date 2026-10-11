@@ -257,11 +257,21 @@ def _send_ctrl_c() -> None:
     user32.SendInput(len(items), arr, ctypes.sizeof(_INPUT))
 
 
-def _restore_clipboard_text(text: str | None) -> None:
-    """350ms 后在独立线程还原剪贴板（立即还原会干扰原应用的粘贴行为）。"""
+def _restore_clipboard_text(text: str | None, expect_seq: int | None = None) -> None:
+    """350ms 后在独立线程还原剪贴板（立即还原会干扰原应用的粘贴行为）。
+
+    - expect_seq：仅当剪贴板序号仍等于该值时才还原，避免覆盖用户期间新复制的内容。
+    - text 为 None（原剪贴板无文本，如空/图片）：跳过还原，避免误清用户内容。
+    """
 
     def _do_restore():
         time.sleep(0.35)
+        if expect_seq is not None and _clip_seq() != expect_seq:
+            log.debug("剪贴板已被用户改动，跳过还原")
+            return
+        if text is None:
+            log.debug("原剪贴板无文本可还原，跳过还原")
+            return
         for _ in range(3):
             try:
                 win32clipboard.OpenClipboard(None)
@@ -300,19 +310,19 @@ def _clipboard_selection(max_text_len: int) -> Selection | None:
     _send_ctrl_c()
 
     deadline = time.perf_counter() + 0.3
-    copied = False
+    copied_seq = None
     while time.perf_counter() < deadline:
-        if _clip_seq() != seq_before:
-            copied = True
+        seq_now = _clip_seq()
+        if seq_now != seq_before:
+            copied_seq = seq_now
             break
         time.sleep(0.01)
 
-    if not copied:
-        _restore_clipboard_text(backed_up)
-        return None
+    if copied_seq is None:
+        return None  # 未复制成功：剪贴板未变，无需还原
 
     text = _clipboard_text()
-    _restore_clipboard_text(backed_up)
+    _restore_clipboard_text(backed_up, copied_seq)  # 若期间剪贴板再变则自动跳过
     if not text or not text.strip():
         return None
     raw_len = len(text.strip())
@@ -385,20 +395,24 @@ class CaptureWorker(threading.Thread):
                     break
                 try:
                     sel = None
+                    emit = True
                     if job["mode"] == "silent":
                         with self._lock:
-                            stale = job["id"] != self._latest_id
-                        if stale:
-                            self._q.task_done()
-                            continue
-                        pname = foreground_process_name()
-                        if pname and pname in blacklist:
-                            log.debug("进程 %s 命中黑名单，跳过静默取词", pname)
-                        else:
-                            sel = _uia_selection(job["max_text_len"])
+                            if job["id"] != self._latest_id:
+                                emit = False  # 出队前已被更新的请求取代
+                        if emit:
+                            pname = foreground_process_name()
+                            if pname and pname in blacklist:
+                                log.debug("进程 %s 命中黑名单，跳过静默取词", pname)
+                            else:
+                                sel = _uia_selection(job["max_text_len"])
+                                with self._lock:
+                                    if job["id"] != self._latest_id:
+                                        emit = False  # 取词期间又出现了更新的请求
                     else:  # explicit
                         sel = get_selection("explicit", job["max_text_len"])
-                    self._emit({"req": job, "sel": sel})
+                    if emit:
+                        self._emit({"req": job, "sel": sel})
                 except Exception:  # noqa: BLE001
                     log.exception("捕获线程处理任务失败")
                     try:

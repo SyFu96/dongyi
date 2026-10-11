@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -49,6 +50,8 @@ QMenu { background: #25292e; color: #d5dade; border: 1px solid #3a3f45; }
 QMenu::item { padding: 4px 24px; }
 QMenu::item:selected { background: #363d45; }
 QLineEdit, QPlainTextEdit { background: #25292e; color: #d5dade; border: 1px solid #40464d; border-radius: 4px; padding: 5px; }
+QComboBox { background: #2b3138; color: #d5dade; border: 1px solid #40464d; border-radius: 4px; padding: 3px 8px; }
+QComboBox QAbstractItemView { background: #25292e; color: #d5dade; selection-background-color: #363d45; }
 QToolButton:checked { background: #245779; color: #e4f4ff; }
 #sourceText { color: #eceff2; }
 #statusLabel { color: #7f8992; }
@@ -73,6 +76,8 @@ QMenu { background: #ffffff; color: #20242a; border: 1px solid #b9bec5; }
 QMenu::item { padding: 4px 24px; }
 QMenu::item:selected { background: #dfe3e8; }
 QLineEdit, QPlainTextEdit { background: #ffffff; color: #20242a; border: 1px solid #b9bec5; border-radius: 4px; padding: 5px; }
+QComboBox { background: #e8ebef; color: #20242a; border: 1px solid #b9bec5; border-radius: 4px; padding: 3px 8px; }
+QComboBox QAbstractItemView { background: #ffffff; color: #20242a; selection-background-color: #dfe3e8; }
 QToolButton:checked { background: #c9e5fa; color: #174d76; }
 #sourceText { color: #14171a; }
 #statusLabel { color: #72797f; }
@@ -88,14 +93,22 @@ def app_theme_qss(theme: str) -> str:
 
 
 def screen_for_physical(px: float, py: float):
-    """返回物理坐标所在的屏幕；找不到则回主屏。"""
+    """返回物理坐标所在的屏幕；找不到则回主屏。
+
+    多屏 + 混合缩放下，QScreen.geometry() 的"原点是否已按 DPR 缩放"在不同 Qt/平台
+    实现并不统一（尺寸恒为逻辑像素）。这里对"原点乘 DPR"和"原点不缩放"两种映射都试
+    一遍，命中即返回；单屏或主屏（原点为 0）下两种等价，行为不变。
+    """
     screens = QGuiApplication.screens()
     primary = QGuiApplication.primaryScreen() or screens[0]
-    for s in screens:
-        dpr = s.devicePixelRatio() or 1.0
-        g = s.geometry()
-        if g.x() * dpr <= px < (g.x() + g.width()) * dpr and g.y() * dpr <= py < (g.y() + g.height()) * dpr:
-            return s
+    for scale_origin in (True, False):
+        for s in screens:
+            dpr = s.devicePixelRatio() or 1.0
+            g = s.geometry()
+            ox = g.x() * dpr if scale_origin else g.x()
+            oy = g.y() * dpr if scale_origin else g.y()
+            if ox <= px < ox + g.width() * dpr and oy <= py < oy + g.height() * dpr:
+                return s
     return primary
 
 
@@ -285,17 +298,32 @@ class QuestionInput(QPlainTextEdit):
         self.setTextCursor(cursor)
 
 
+class _InputEditor(QPlainTextEdit):
+    """输入翻译的文本编辑框：Ctrl+Enter 触发翻译。"""
+
+    submit = Signal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() & Qt.ControlModifier:
+            self.submit.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class PopupWindow(QWidget):
     """译文、解释、追问弹窗，支持保持在最前与流式渲染。"""
 
-    KINDS = ("translate", "explain", "chat")
-    TAB_TITLES = {"translate": "译文", "explain": "解释", "chat": "追问"}
+    KINDS = ("translate", "explain", "chat", "input")
+    TAB_TITLES = {"translate": "译文", "explain": "解释", "chat": "追问", "input": "输入翻译"}
 
     switch_requested = Signal(str)  # 首次切到某标签需要发起请求
     retry_requested = Signal(str)
     stop_requested = Signal(str)
     close_requested = Signal()
     question_submitted = Signal(str)
+    input_requested = Signal(str, object)  # (text, target_lang|None)
+    tab_changed = Signal(str)  # 当前标签变化，供外部刷新后端/地址显示
 
     def __init__(self, cfg: dict) -> None:
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -378,16 +406,25 @@ class PopupWindow(QWidget):
         self.tabs = QTabWidget()
         tabs_holder = self.tabs
         for i, kind in enumerate(self.KINDS):
-            page = self._make_chat_page() if kind == "chat" else self._make_page(kind)
+            if kind == "chat":
+                page = self._make_chat_page()
+            elif kind == "input":
+                page = self._make_input_page()
+            else:
+                page = self._make_page(kind)
             tabs_holder.addTab(page, self.TAB_TITLES[kind])
         tabs_holder.currentChanged.connect(self._on_tab_changed)
         fv.addWidget(tabs_holder, 1)
 
         resize_row = QHBoxLayout()
+        self.lbl_backend = QLabel("")
+        self.lbl_backend.setObjectName("statusLabel")
+        self.lbl_backend.setToolTip("当前标签实际使用的后端 / 模型 / 目的地址")
+        resize_row.addWidget(self.lbl_backend)
+        resize_row.addStretch(1)
         resize_hint = QLabel("拖动右下角调整大小")
         resize_hint.setObjectName("statusLabel")
         resize_row.addWidget(resize_hint)
-        resize_row.addStretch(1)
         self.size_grip = QSizeGrip(self)
         self.size_grip.setFixedSize(20, 20)
         self.size_grip.setToolTip("按住右下角，拖动调整窗口大小。")
@@ -476,6 +513,86 @@ class PopupWindow(QWidget):
         layout.addWidget(copy)
         return page
 
+    def _make_input_page(self) -> QWidget:
+        """第 4 个标签：自己输入内容翻译成指定语种。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 6)
+        layout.setSpacing(6)
+
+        self.input_editor = _InputEditor()
+        self.input_editor.setPlaceholderText("在此输入或粘贴要翻译的内容（Ctrl+Enter 翻译）…")
+        self.input_editor.setMinimumHeight(40)
+        self.input_editor.setMaximumHeight(120)
+        self.input_editor.submit.connect(self._submit_input)
+        layout.addWidget(self.input_editor)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("译为"))
+        self.input_combo = QComboBox()
+        self.input_combo.setEditable(True)
+        self.input_combo.addItems([label for label, _ in TARGET_LANGUAGES])
+        self.input_combo.setToolTip("下拉选择，或直接输入目标语种（如「粤语」）")
+        row.addWidget(self.input_combo, 1)
+        self.input_btn = QPushButton("翻译")
+        self.input_btn.clicked.connect(self._submit_input)
+        row.addWidget(self.input_btn)
+        layout.addLayout(row)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QLabel("")
+        content.setWordWrap(True)
+        content.setTextFormat(Qt.PlainText)
+        content.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        content.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        scroll.setWidget(content)
+        self._scrolls["input"] = scroll
+        self._labels["input"] = content
+        layout.addWidget(scroll, 1)
+
+        prow = QHBoxLayout()
+        prow.setSpacing(6)
+        status = QLabel("")
+        status.setObjectName("statusLabel")
+        prow.addWidget(status, 1)
+        prow.addWidget(self._make_stop_button("input"))
+        retry = QPushButton("重试")
+        retry.setObjectName("retryBtn")
+        retry.setVisible(False)
+        retry.clicked.connect(lambda: self.retry_requested.emit("input"))
+        prow.addWidget(retry)
+        self._statuses["input"] = status
+        self._retries["input"] = retry
+        layout.addLayout(prow)
+
+        brow = QHBoxLayout()
+        copy = QPushButton("复制译文")
+        copy.clicked.connect(lambda: self._copy_page("input"))
+        brow.addWidget(copy)
+        brow.addStretch(1)
+        layout.addLayout(brow)
+        return page
+
+    def _submit_input(self) -> None:
+        text = self.input_editor.toPlainText().strip()
+        if not text or "input" in self._pending:
+            return
+        self.input_requested.emit(text, self._target_language())
+
+    def _target_language(self):
+        label = self.input_combo.currentText().strip()
+        for text, lang in TARGET_LANGUAGES:
+            if text == label:
+                return lang  # None = 自动中英互译
+        return label or None  # 自定义输入：直接当语言名
+
+    def show_input_tab(self) -> None:
+        """切到「输入翻译」标签并聚焦输入框（不清空已有内容）。"""
+        self.tabs.setCurrentIndex(self.KINDS.index("input"))
+        self.activateWindow()
+        self.input_editor.setFocus(Qt.OtherFocusReason)
+
     def _make_stop_button(self, kind: str) -> QPushButton:
         button = QPushButton("停止")
         button.setToolTip("终止本次生成，保留已经显示的内容。")
@@ -537,7 +654,7 @@ class PopupWindow(QWidget):
         self._texts = {k: "" for k in self.KINDS}
         self._bufs = {k: [] for k in self.KINDS}
         self._requested = {initial_kind}
-        self._pending = {initial_kind}
+        self._pending = set() if initial_kind == "input" else {initial_kind}
         self._t0.clear()
         self._collapsed = True
         self._chat_turns.clear()
@@ -555,10 +672,10 @@ class PopupWindow(QWidget):
         for k in self.KINDS:
             if k != "chat":
                 self._labels[k].setText("")
-            self._statuses[k].setText("请求中…" if k == initial_kind else "")
+            self._statuses[k].setText("请求中…" if (k == initial_kind and k != "input") else "")
             self._statuses[k].setStyleSheet("")
             self._retries[k].setVisible(False)
-            self._stops[k].setVisible(k == initial_kind)
+            self._stops[k].setVisible(k == initial_kind and k != "input")
             self._scrolls[k].verticalScrollBar().setValue(0)
         self.btn_expand.setText("\u25be 展开")
 
@@ -570,10 +687,49 @@ class PopupWindow(QWidget):
 
         place_window(self, phys_x, phys_y)
         self.show()
+        if initial_kind == "input":
+            self.activateWindow()
+            self.input_editor.setFocus(Qt.OtherFocusReason)
 
-    def mark_pending(self, kind: str, t0: float | None = None) -> None:
-        """请求已派发：状态置"请求中…"。"""
-        self._statuses[kind].setText("请求中…")
+    def begin_source(self, text: str) -> None:
+        """把输入翻译的文本设为当前讨论对象：更新原文头，并重置译文/解释/追问状态。"""
+        self._source_text = text
+        self.lbl_source.setText(text)
+        self.lbl_source.setMaximumHeight(16777215)
+        self._collapsed = True
+        self._apply_collapse()
+        self.lbl_trunc.setVisible(False)
+        self._requested = {"input"}  # 译文/解释/追问对"新原文"尚未请求
+        for k in ("translate", "explain"):
+            self._pending.discard(k)
+            self._texts[k] = ""
+            self._bufs[k].clear()
+            self._labels[k].clear()
+            self._statuses[k].setText("")
+            self._statuses[k].setStyleSheet("")
+            self._stops[k].setVisible(False)
+            self._retries[k].setVisible(False)
+        self._pending.discard("chat")
+        self._texts["chat"] = ""
+        self._bufs["chat"].clear()
+        self._statuses["chat"].setText("")
+        self._statuses["chat"].setStyleSheet("")
+        self._stops["chat"].setVisible(False)
+        self._retries["chat"].setVisible(False)
+        self._chat_turns.clear()
+        self._render_chat()
+        self.chat_view.clear()
+        self._chat_busy = False
+        self.btn_send.setEnabled(True)
+        self.question_input.clear()
+
+    def set_backend(self, text: str) -> None:
+        """显示当前标签实际使用的后端/模型/地址。"""
+        self.lbl_backend.setText(text)
+
+    def mark_pending(self, kind: str, t0: float | None = None, label: str = "请求中…") -> None:
+        """请求已派发：状态置 label（默认"请求中…"，检索阶段可传"联网检索中…"）。"""
+        self._statuses[kind].setText(label)
         self._statuses[kind].setStyleSheet("")
         self._retries[kind].setVisible(False)
         self._retries[kind].setText("重试")
@@ -641,11 +797,17 @@ class PopupWindow(QWidget):
 
     def _on_tab_changed(self, idx: int) -> None:
         kind = self.KINDS[idx]
+        self.tab_changed.emit(kind)
         if kind == "chat":
             self.btn_pin.setChecked(True)
             self.resize(self.width(), max(self.height(), 460))
             self.activateWindow()
             self.question_input.setFocus(Qt.OtherFocusReason)
+            return
+        if kind == "input":
+            self.btn_pin.setChecked(True)
+            self.activateWindow()
+            self.input_editor.setFocus(Qt.OtherFocusReason)
             return
         if kind not in self._requested:
             self._requested.add(kind)
@@ -695,6 +857,27 @@ class PopupWindow(QWidget):
         QApplication.clipboard().setText(text)
 
 
+# ---------------------------------------------------------------- 输入翻译
+
+
+# (下拉显示, 提示词里的语言名)；None 表示自动中英互译（沿用 prompts.translate）
+TARGET_LANGUAGES = [
+    ("自动（中→英 / 其他→中）", None),
+    ("中文", "中文"),
+    ("英文", "英文"),
+    ("繁体中文", "繁体中文"),
+    ("日文", "日文"),
+    ("韩文", "韩文"),
+    ("法文", "法语"),
+    ("德文", "德语"),
+    ("西班牙文", "西班牙语"),
+    ("俄文", "俄语"),
+    ("意大利文", "意大利语"),
+    ("葡萄牙文", "葡萄牙语"),
+    ("阿拉伯文", "阿拉伯语"),
+]
+
+
 # ---------------------------------------------------------------- 托盘
 
 
@@ -713,8 +896,15 @@ class TrayIcon(QSystemTrayIcon):
         menu = QMenu()
         menu.setStyleSheet(DARK_QSS)
         menu.addAction("状态与测试").triggered.connect(actions["show_status"])
+        menu.addAction("输入翻译…").triggered.connect(actions["open_input"])
+        menu.addAction("设置…").triggered.connect(actions["open_settings"])
         self.act_pause = menu.addAction("暂停监听")
         self.act_pause.triggered.connect(actions["pause"])
+        self.act_web = menu.addAction("联网查询")
+        self.act_web.setCheckable(True)
+        self.act_web.setChecked(actions.get("web_search_enabled", False))
+        self.act_web.setToolTip("解释与追问时先联网检索再回答（需在 config.json 配置 web_search.api_key）")
+        self.act_web.toggled.connect(actions["set_web_search"])
         menu.addAction("打开配置文件").triggered.connect(actions["open_config"])
         self.act_autostart = menu.addAction("开机自启动")
         self.act_autostart.setCheckable(True)
@@ -747,6 +937,8 @@ class StatusWindow(QWidget):
     """可见的启动入口；关闭窗口后继续在托盘运行。"""
 
     test_requested = Signal()
+    input_requested = Signal()
+    settings_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self) -> None:
@@ -769,7 +961,8 @@ class StatusWindow(QWidget):
         instructions = QLabel(
             "使用方法：\n"
             "在其他应用里选中文字，点击选区旁的「译」。\n"
-            "也可以选中文字后按 Ctrl+Alt+Shift+T 翻译，或 Ctrl+Alt+Shift+E 解释。\n\n"
+            "也可以选中文字后按 Ctrl+Alt+Shift+T 翻译，或 Ctrl+Alt+Shift+E 解释。\n"
+            "想自己输入内容翻译：按 Ctrl+Alt+Shift+I，或右键托盘 →「输入翻译…」。\n\n"
             "工具启动后安静地在后台运行。右键托盘图标可查看状态、设置开机自启动或退出。"
         )
         instructions.setWordWrap(True)
@@ -779,6 +972,14 @@ class StatusWindow(QWidget):
         test = QPushButton("测试翻译")
         test.clicked.connect(self.test_requested.emit)
         buttons.addWidget(test)
+        input_btn = QPushButton("输入翻译")
+        input_btn.setToolTip("输入或粘贴文本，翻译成指定语种（也可按 Ctrl+Alt+Shift+I）")
+        input_btn.clicked.connect(self.input_requested.emit)
+        buttons.addWidget(input_btn)
+        settings_btn = QPushButton("设置")
+        settings_btn.setToolTip("选择本地大模型 / 云端 API、填写 Key、联网检索")
+        settings_btn.clicked.connect(self.settings_requested.emit)
+        buttons.addWidget(settings_btn)
         buttons.addStretch()
         background = QPushButton("后台运行")
         background.clicked.connect(self.hide)

@@ -1,7 +1,22 @@
 {
+  "provider": "ollama",
+  "kind_providers": {},
+  "offline": false,
   "base_url": "http://localhost:11434",
   "model": "qwen3-vl:30b-a3b-instruct",
   "keep_alive": "30m",
+  "cloud": {
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "api_key": "",
+    "api_key_env": ""
+  },
+  "web_search": {
+    "enabled": false,
+    "endpoint": "https://ollama.com/api/web_search",
+    "api_key": "",
+    "max_results": 5
+  },
   "prefetch_explain": false,
   "show_startup_window": false,
   "auto_start_ollama": true,
@@ -10,7 +25,8 @@
   "icon_timeout_s": 3,
   "hotkeys": {
     "translate": "<ctrl>+<alt>+<shift>+t",
-    "explain": "<ctrl>+<alt>+<shift>+e"
+    "explain": "<ctrl>+<alt>+<shift>+e",
+    "input": "<ctrl>+<alt>+<shift>+i"
   },
   "prompts": {
     "translate": "你是划词翻译引擎。自动识别语言：非中文译为中文，中文译为英文。只输出译文，保留换行与格式，不要任何解释。",

@@ -1,10 +1,33 @@
 [project]
 name = "huayi"
 version = "0.1.0"
+description = "Windows 桌面划词翻译工具：本地 Ollama 与云端混合、解释/追问、联网检索（PySide6）"
+readme = "README.md"
+license = "GPL-3.0-only"
 requires-python = ">=3.13"
+authors = [{ name = "Eleven Fu" }]
+keywords = ["translation", "ollama", "llm", "pyside6", "windows", "text-selection"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = [
     "pynput>=1.8.2",
     "pyside6>=6.11.2",
     "pywin32>=312",
     "uiautomation>=2.0.29",
 ]
+
+[dependency-groups]
+dev = ["pyinstaller>=6.10"]
+
+# 发布到 GitHub 后按需补全（urls = 项目主页/仓库/问题反馈链接）：
+# [project.urls]
+# Repository = "https://github.com/<用户名>/huayi"
+# Issues = "https://github.com/<用户名>/huayi/issues"

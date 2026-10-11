@@ -1,12 +1,19 @@
-"""当前用户的静默启动快捷方式；无需管理员权限。"""
+"""当前用户的静默启动快捷方式；无需管理员权限。
 
-from pathlib import Path
+源码运行时用 wscript + launch.vbs 隐藏窗口；打包成 exe 后直接指向 exe。
+"""
+
 import os
+import sys
+from pathlib import Path
 
 from win32com.client import Dispatch
 from win32com.shell import shell, shellcon
 
-APP_DIR = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)
+APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+LAUNCH_VBS = APP_DIR / "launch.vbs"
+ICON = APP_DIR / "assets" / "huayi.ico"
 
 
 def startup_shortcut() -> Path:
@@ -18,16 +25,23 @@ def is_enabled() -> bool:
     if not link.exists():
         return False
     shortcut = Dispatch("WScript.Shell").CreateShortcut(str(link))
-    return str(APP_DIR / "launch.vbs").casefold() in shortcut.Arguments.casefold()
+    if FROZEN:
+        return str(sys.executable).casefold() in shortcut.TargetPath.casefold()
+    return str(LAUNCH_VBS).casefold() in shortcut.Arguments.casefold()
 
 
 def create_shortcut(path: Path) -> None:
     shortcut = Dispatch("WScript.Shell").CreateShortcut(str(path))
-    shortcut.TargetPath = str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe")
-    shortcut.Arguments = '//B //Nologo "' + str(APP_DIR / "launch.vbs") + '"'
+    if FROZEN:
+        shortcut.TargetPath = str(sys.executable)
+        shortcut.Arguments = ""
+        shortcut.IconLocation = str(sys.executable)
+    else:
+        shortcut.TargetPath = str(Path(os.environ["WINDIR"]) / "System32" / "wscript.exe")
+        shortcut.Arguments = '//B //Nologo "' + str(LAUNCH_VBS) + '"'
+        shortcut.IconLocation = str(ICON)
     shortcut.WorkingDirectory = str(APP_DIR)
     shortcut.WindowStyle = 7
-    shortcut.IconLocation = str(APP_DIR / "assets" / "huayi.ico")
     shortcut.Description = "划译 — 后台划词翻译与追问"
     shortcut.Save()
 

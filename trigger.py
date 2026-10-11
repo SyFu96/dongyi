@@ -53,7 +53,7 @@ class Monitor(QObject):
 
         hotkeys_cfg = cfg.get("hotkeys") or {}
         mapped: dict[str, object] = {}
-        for kind in ("translate", "explain"):
+        for kind in ("translate", "explain", "input"):
             descr = hotkeys_cfg.get(kind)
             if not descr:
                 continue

@@ -8,13 +8,16 @@ CHAT_PROMPT = (
 
 
 def build_messages(cfg: dict, source: str, translation: str, explanation: str,
-                   history: list[dict[str, str]], question: str) -> list[dict[str, str]]:
+                   history: list[dict[str, str]], question: str,
+                   search_context: str = "") -> list[dict[str, str]]:
     prompt = cfg.get("prompts", {}).get("chat", CHAT_PROMPT)
     context = f"\n\n原文：\n{source}"
     if translation:
         context += f"\n\n已有译文：\n{translation}"
     if explanation:
         context += f"\n\n已有解释：\n{explanation}"
+    if search_context:
+        context += f"\n\n{search_context}"
     return [
         {"role": "system", "content": prompt + context},
         *[dict(message) for message in history[-24:]],
