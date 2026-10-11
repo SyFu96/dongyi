@@ -195,6 +195,39 @@ class DomainIntegrationTests(unittest.TestCase):
         c.on_tm_save("explain")
         self.assertEqual(c.tmstore.count("battery"), before)
 
+    def test_tm_save_snapshots_source_against_dialog_reentry(self):
+        # M6 回归：exec() 的嵌套事件循环期间可能收到新取词结果，
+        # 保存进记忆的原文必须是打开对话框那一刻的快照
+        c = self.controller
+        c.set_domain("battery")
+        self.open_selection("The SEI forms here.")
+        c.popup.append_chunk("translate", "SEI 在此形成。")
+        c.popup.mark_done("translate")
+
+        captured: dict = {}
+
+        class FakeDialog:
+            Accepted = 1  # 与 QDialog.DialogCode.Accepted 一致
+
+            def __init__(self, source, translation):
+                captured["source"] = source
+                self._translation = translation
+
+            def exec(self):
+                # 模拟对话框打开期间，后台取词回调把 _sel 换成了新文本
+                c._sel = Selection(text="A NEW selection arrived mid-dialog.")
+                return self.Accepted
+
+            def translation(self):
+                return self._translation
+
+        with patch.object(huayi, "TmEditDialog", FakeDialog):
+            c.on_tm_save("translate")
+        entries = c.tmstore._load(c.tmstore.path_for("battery"))[0]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["src"], "The SEI forms here.")  # 快照，不是新取词
+        self.assertEqual(entries[0]["tgt"], "SEI 在此形成。")
+
     def test_kb_dir_change_while_busy_is_not_lost(self):
         # M3 回归：索引忙时到来的目录变更必须被记录补跑，而不是被签名吞掉
         c = self.controller

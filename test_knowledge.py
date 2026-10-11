@@ -53,6 +53,46 @@ class KnowledgeStoreTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
+    def test_search_consistent_under_concurrent_refresh(self):
+        # M2 回归：refresh 与 search 并发时，返回的文本必须与评分来自同一代索引
+        # （不会拿新词频评旧文本、也不会越界），且任何命中都是真实存在过的版本
+        import threading
+
+        known_versions: set[str] = set()
+        for i in range(3):
+            text = f"shared topic{i} content " * 4
+            self._write(f"f{i}.txt", text)
+            known_versions.add(text.strip())  # 索引存的是 strip 后的分块
+        store = knowledge.KnowledgeStore(self.index_dir)
+        store.refresh([str(self.docs)])
+
+        stop = threading.Event()
+
+        def refresher() -> None:
+            n = 0
+            while not stop.is_set():
+                text = f"shared topicX{n} content " * 4
+                try:
+                    (self.docs / "f0.txt").write_text(text, encoding="utf-8")
+                    known_versions.add(text.strip())
+                    store.refresh([str(self.docs)])
+                except Exception:  # noqa: BLE001 — 刷新线程的错误由断言外观察
+                    pass
+                n += 1
+
+        thread = threading.Thread(target=refresher, daemon=True)
+        thread.start()
+        try:
+            for _ in range(40):
+                hits = store.search("shared content", dirs=[str(self.docs)])
+                for hit in hits:
+                    self.assertTrue(hit["text"])
+                    self.assertTrue(hit["path"].endswith((".txt",)))
+                    self.assertIn(hit["text"], known_versions)  # 不会拼出从未存在的文本
+        finally:
+            stop.set()
+            thread.join(5)
+
     def test_avgdl_counts_all_tokens_not_unique(self):
         # M1 回归：平均块长必须与评分的块长同口径（全部 token 数），
         # 否则重复词多的块被错误惩罚
