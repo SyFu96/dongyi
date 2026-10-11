@@ -27,7 +27,6 @@ dependencies = [
 [dependency-groups]
 dev = ["pyinstaller>=6.10"]
 
-# 发布到 GitHub 后按需补全（urls = 项目主页/仓库/问题反馈链接）：
-# [project.urls]
-# Repository = "https://github.com/<用户名>/huayi"
-# Issues = "https://github.com/<用户名>/huayi/issues"
+[project.urls]
+Repository = "https://github.com/SyFu96/huayi"
+Issues = "https://github.com/SyFu96/huayi/issues"
