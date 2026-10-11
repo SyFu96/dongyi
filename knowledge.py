@@ -360,7 +360,10 @@ class KnowledgeStore:
                     continue
                 if stat.st_size > MAX_FILE_BYTES:
                     continue
-                wanted[str(path.resolve())] = (stat.st_mtime, stat.st_size)
+                # 用 abspath 而不是 resolve()：CI/网络盘上临时目录常是 8.3 短名
+                # （RUNNER~1），resolve 会展开成另一个字符串，导致目录前缀过滤
+                # 与测试断言全部失配。存储/过滤/排除统一用 abspath 口径。
+                wanted[os.path.abspath(path)] = (stat.st_mtime, stat.st_size)
 
         with self._lock:
             old_by_path: dict[str, list[dict]] = {}

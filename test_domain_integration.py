@@ -490,6 +490,27 @@ class SettingsFormRegressionTests(unittest.TestCase):
             window.deleteLater()
             QTest.qWait(5)
 
+    def test_settings_window_shrinks_on_small_screens(self):
+        # 回归：领域管理区块加入后，设置窗最小高度曾被撑到 1063，
+        # 超过小屏可用高度（如 1000）→ 底部保存/取消开出屏幕外，"设置打不开"。
+        # 内容区改滚动布局后，窗口必须能收缩，且按钮始终可达。
+        cfg = self._make_cfg()
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        try:
+            window.show()
+            window.resize(560, 600)
+            QTest.qWait(10)
+            self.assertLessEqual(window.height(), 700,
+                                 "设置窗被内容最小高度卡死，小屏放不下")
+            from PySide6.QtWidgets import QPushButton
+            save = next(b for b in window.findChildren(QPushButton) if b.text() == "保存")
+            self.assertTrue(window.rect().contains(save.mapTo(window, save.rect().center())),
+                            "保存按钮不在窗口可见范围内")
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
     def test_empty_domains_form_is_safe(self):
         cfg = self._make_cfg()
         cfg["domains"] = {}

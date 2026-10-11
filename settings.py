@@ -18,6 +18,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -67,8 +69,10 @@ class SettingsWindow(QWidget):
         self._loading_form = False  # 表单载入期间阻断控件信号回写工作副本
         self.setWindowTitle("懂译 — 设置")
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # 置顶，避免被划词弹窗挡住
-        self.resize(640, 880)
-        self.setMinimumWidth(560)
+        # 初始高度不超过屏幕可用高度的 90%：内容区可滚动，小屏也能完整操作
+        avail = QGuiApplication.primaryScreen().availableGeometry()
+        self.resize(640, min(880, int(avail.height() * 0.9)))
+        self.setMinimumWidth(520)
         self.models_loaded.connect(self._populate_local)
         self.test_result.connect(self._show_test_result)
         self._build()
@@ -76,7 +80,18 @@ class SettingsWindow(QWidget):
     # —— 构建
 
     def _build(self) -> None:
-        v = QVBoxLayout(self)
+        # 外层 = 滚动内容区 + 固定按钮行：设置项多（领域管理加入后内容很高），
+        # 小屏（如 1600×1000 逻辑高度）放不下整窗，必须允许内容滚动，
+        # 且取消/保存始终可见可点——否则窗口底部开出屏幕外，看起来像"打不开"
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        v = QVBoxLayout(body)
         v.setContentsMargins(14, 14, 14, 14)
         v.setSpacing(10)
 
@@ -139,8 +154,13 @@ class SettingsWindow(QWidget):
         hint.setObjectName("statusLabel")
         hint.setWordWrap(True)
         v.addWidget(hint)
+        v.addStretch(1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
         btns = QHBoxLayout()
+        btns.setContentsMargins(14, 8, 14, 10)
         btns.addStretch(1)
         cancel = QPushButton("取消")
         cancel.clicked.connect(self.hide)
@@ -148,7 +168,7 @@ class SettingsWindow(QWidget):
         save = QPushButton("保存")
         save.clicked.connect(self._on_save)
         btns.addWidget(save)
-        v.addLayout(btns)
+        outer.addLayout(btns)
 
     def _build_domain_box(self) -> QGroupBox:
         box = QGroupBox("领域与知识库（学科适配）")
