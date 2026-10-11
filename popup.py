@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixm
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
@@ -311,6 +312,43 @@ class _InputEditor(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+class TmEditDialog(QDialog):
+    """「存为记忆」：展示原文，允许先修正译文再保存到翻译记忆。"""
+
+    def __init__(self, source: str, translation: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("存入翻译记忆")
+        self.resize(480, 360)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(6)
+        layout.addWidget(QLabel("原文："))
+        source_view = QPlainTextEdit(source)
+        source_view.setReadOnly(True)
+        source_view.setMaximumHeight(96)
+        layout.addWidget(source_view)
+        layout.addWidget(QLabel("译文（可先修正，再保存）："))
+        self.editor = QPlainTextEdit(translation)
+        layout.addWidget(self.editor, 1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = QPushButton("保存")
+        save.setDefault(True)
+        save.clicked.connect(self._save)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+    def _save(self) -> None:
+        if not self.editor.toPlainText().strip():
+            return  # 空译文不保存，停留在对话框
+        self.accept()
+
+    def translation(self) -> str:
+        return self.editor.toPlainText().strip()
+
+
 class PopupWindow(QWidget):
     """译文、解释、追问弹窗，支持保持在最前与流式渲染。"""
 
@@ -324,6 +362,8 @@ class PopupWindow(QWidget):
     question_submitted = Signal(str)
     input_requested = Signal(str, object)  # (text, target_lang|None)
     tab_changed = Signal(str)  # 当前标签变化，供外部刷新后端/地址显示
+    domain_changed = Signal(str)  # 学科下拉切换（领域 id，空 = 通用）
+    tm_save_requested = Signal(str)  # 「存为记忆」（kind）
 
     def __init__(self, cfg: dict) -> None:
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -380,6 +420,19 @@ class PopupWindow(QWidget):
         self.btn_expand.setVisible(False)
         self.btn_expand.clicked.connect(self._toggle_expand)
         hrow.addWidget(self.btn_expand)
+        # 学科切换：下拉选择领域（通用 / 用户自建），切换后下次请求生效。
+        # 放在按钮行避免抬高弹窗最小高度。
+        dom_label = QLabel("学科")
+        dom_label.setObjectName("statusLabel")
+        hrow.addWidget(dom_label)
+        self.domain_combo = QComboBox()
+        self.domain_combo.setToolTip(
+            "选择当前学科（领域）：切换后自动附加领域说明、强制术语表、"
+            "知识库片段与翻译记忆。在设置里可自建领域。")
+        self.domain_combo.setMinimumWidth(90)
+        self.domain_combo.setFixedHeight(22)
+        self.domain_combo.currentIndexChanged.connect(self._on_domain_selected)
+        hrow.addWidget(self.domain_combo)
         hrow.addStretch(1)
         self.lbl_trunc = QLabel("")
         self.lbl_trunc.setObjectName("truncBanner")
@@ -473,6 +526,10 @@ class PopupWindow(QWidget):
         copy_btn = QPushButton("复制内容")
         copy_btn.clicked.connect(lambda _=False, k=kind: self._copy_page(k))
         brow.addWidget(copy_btn)
+        tm_btn = QPushButton("存为记忆")
+        tm_btn.setToolTip("修正译文后存入翻译记忆；以后翻译相似句子会自动作为参考。")
+        tm_btn.clicked.connect(lambda _=False, k=kind: self.tm_save_requested.emit(k))
+        brow.addWidget(tm_btn)
         brow.addStretch(1)
         v.addLayout(brow)
         return page
@@ -570,6 +627,10 @@ class PopupWindow(QWidget):
         copy = QPushButton("复制译文")
         copy.clicked.connect(lambda: self._copy_page("input"))
         brow.addWidget(copy)
+        tm_btn = QPushButton("存为记忆")
+        tm_btn.setToolTip("修正译文后存入翻译记忆；以后翻译相似句子会自动作为参考。")
+        tm_btn.clicked.connect(lambda _=False: self.tm_save_requested.emit("input"))
+        brow.addWidget(tm_btn)
         brow.addStretch(1)
         layout.addLayout(brow)
         return page
@@ -726,6 +787,25 @@ class PopupWindow(QWidget):
     def set_backend(self, text: str) -> None:
         """显示当前标签实际使用的后端/模型/地址。"""
         self.lbl_backend.setText(text)
+
+    # —— 学科（领域）切换
+
+    def set_domains(self, pairs: list[tuple[str, str]], active: str) -> None:
+        """重建学科下拉：pairs = [(id, 显示名)]，首项应为通用（id 为空）。"""
+        self.domain_combo.blockSignals(True)
+        self.domain_combo.clear()
+        for did, name in pairs:
+            self.domain_combo.addItem(name or did or "通用", did)
+        index = 0
+        for i in range(self.domain_combo.count()):
+            if self.domain_combo.itemData(i) == active:
+                index = i
+                break
+        self.domain_combo.setCurrentIndex(index)
+        self.domain_combo.blockSignals(False)
+
+    def _on_domain_selected(self, _index: int) -> None:
+        self.domain_changed.emit(self.domain_combo.currentData() or "")
 
     def mark_pending(self, kind: str, t0: float | None = None, label: str = "请求中…") -> None:
         """请求已派发：状态置 label（默认"请求中…"，检索阶段可传"联网检索中…"）。"""
@@ -886,6 +966,7 @@ class TrayIcon(QSystemTrayIcon):
 
     def __init__(self, actions: dict, parent=None) -> None:
         super().__init__(self._make_icon(), parent)
+        self._actions = actions
         self.setToolTip("划译 — 本地划词翻译")
         self.activated.connect(
             lambda reason: actions["show_status"]()
@@ -905,6 +986,9 @@ class TrayIcon(QSystemTrayIcon):
         self.act_web.setChecked(actions.get("web_search_enabled", False))
         self.act_web.setToolTip("解释与追问时先联网检索再回答（需在 config.json 配置 web_search.api_key）")
         self.act_web.toggled.connect(actions["set_web_search"])
+        self.domain_menu = menu.addMenu("学科")
+        self.set_domains(actions.get("domain_items", lambda: [])(),
+                         actions.get("active_domain", lambda: "")())
         menu.addAction("打开配置文件").triggered.connect(actions["open_config"])
         self.act_autostart = menu.addAction("开机自启动")
         self.act_autostart.setCheckable(True)
@@ -913,6 +997,15 @@ class TrayIcon(QSystemTrayIcon):
         menu.addSeparator()
         menu.addAction("退出").triggered.connect(actions["exit"])
         self.setContextMenu(menu)
+
+    def set_domains(self, items: list[tuple[str, str]], active: str) -> None:
+        """重建「学科」子菜单；切换后由 App 回调同步勾选状态。"""
+        self.domain_menu.clear()
+        for did, name in items:
+            act = self.domain_menu.addAction(name or did or "通用")
+            act.setCheckable(True)
+            act.setChecked(did == active)
+            act.triggered.connect(lambda _checked=False, d=did: self._actions["set_domain"](d))
 
     def set_paused(self, paused: bool) -> None:
         self.act_pause.setText("恢复监听" if paused else "暂停监听")

@@ -22,7 +22,7 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=binaries,
-    datas=datas + [("assets/huayi.ico", "assets")],
+    datas=datas + [("assets/huayi.ico", "assets"), ("glossaries", "glossaries")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

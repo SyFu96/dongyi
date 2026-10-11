@@ -26,6 +26,9 @@
 | `hotkeys` | 热键（pynput 描述格式）：`translate` / `explain` / `input` |
 | `prompts` | 译文 / 解释的系统提示词 |
 | `prompts.chat` | 追问提示词；不配置时使用内置默认 |
+| `domains` | 领域（学科）配置：id → `{name, note, enabled, glossary_file, kb_dirs, kb_enabled, kb_for_translate}`，详见 [DOMAINS.md](DOMAINS.md) |
+| `active_domain` | 当前激活领域 id；空 = 通用模式。弹窗/托盘切换后自动写回 |
+| `tm_enabled` | 翻译记忆总开关，默认 `true` |
 | `blacklist_processes` | 进程名黑名单（如游戏、IDE） |
 | `theme` | `dark` / `light` |
 | `icon_timeout_s` | 浮标无操作自动隐藏秒数（默认 3） |

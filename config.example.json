@@ -37,5 +37,18 @@
   "popup": {
     "width": 460,
     "height": 320
-  }
+  },
+  "domains": {
+    "battery": {
+      "name": "电池/能源",
+      "note": "当前文本属于电池与能源领域（锂离子电池、储能、电化学）。按该领域学术惯例翻译：材料与器件名保留通行英文缩写（如 SEI、SOC、CE）并在首次出现时附中文全称；术语译法严格遵守下方术语对照。",
+      "enabled": true,
+      "glossary_file": "glossaries/battery.csv",
+      "kb_dirs": [],
+      "kb_enabled": false,
+      "kb_for_translate": false
+    }
+  },
+  "active_domain": "",
+  "tm_enabled": true
 }

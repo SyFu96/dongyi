@@ -1,0 +1,40 @@
+﻿# 电池/能源领域术语表：每行 原文,译文,备注(可省略)；# 开头为注释；可直接用 Excel 编辑
+solid electrolyte interphase,固体电解质界面相,常保留缩写 SEI
+SEI,固体电解质界面（SEI）,首次出现时给全称
+CEI,正极电解质界面相,cathode electrolyte interphase
+intercalation,嵌入,
+deintercalation,脱嵌,
+specific capacity,比容量,
+capacity retention,容量保持率,
+rate capability,倍率性能,
+rate performance,倍率性能,
+cycle life,循环寿命,
+cycling stability,循环稳定性,
+coulombic efficiency,库仑效率,常保留缩写 CE
+energy density,能量密度,
+power density,功率密度,
+lithium-ion battery,锂离子电池,
+solid-state battery,固态电池,
+lithium metal anode,锂金属负极,
+graphite anode,石墨负极,
+electrolyte,电解液,固态体系译"电解质"
+electrode,电极,
+anode,负极,
+cathode,正极,
+current collector,集流体,
+binder,粘结剂,
+ionic conductivity,离子电导率,
+electronic conductivity,电子电导率,
+charge transfer,电荷转移,
+overpotential,过电位,
+specific surface area,比表面积,
+state of charge,荷电状态,常保留缩写 SOC
+depth of discharge,放电深度,常保留缩写 DOD
+battery management system,电池管理系统,BMS
+thermal runaway,热失控,
+formation,化成,
+calendering,辊压,
+doping,掺杂,
+coating,包覆,
+pouch cell,软包电池,
+coin cell,扣式电池,

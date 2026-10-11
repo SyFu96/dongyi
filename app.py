@@ -21,6 +21,7 @@ try:
 except Exception:  # noqa: BLE001 — 老系统无此 API，Qt 自会兜底
     pass
 
+import copy
 import json
 import logging
 import os
@@ -40,15 +41,19 @@ from PySide6.QtWidgets import QApplication
 import win32gui
 
 import capture
+import domains
+import knowledge
 import llm
 import netutil
 import search
 import startup
+import tm
 from conversation import CHAT_PROMPT, build_messages
 from instance import SingleInstance
 from popup import (
     ICON_SIZE,
     PopupWindow,
+    TmEditDialog,
     Toast,
     TrayIcon,
     StatusWindow,
@@ -129,9 +134,31 @@ DEFAULTS = {
                    "一句话定义、2-3条关键背景或常见误读；若是句子/段落：解释其含义，外语内容附语法要点。"
                    "不确定之处明确说明，禁止编造。中文回复。",
     },
+    # —— 领域适配（学科模式）——
+    # domains 在 load_config 时按需种入 SEED_DOMAINS（用户删掉后不会复活）；
+    # 每个领域：name 显示名 / note 追加到 system prompt 的领域说明 /
+    # glossary_file 术语表 CSV / kb_dirs 知识库目录 / kb_* 检索开关。
+    "domains": {},
+    "active_domain": "",  # 激活领域 id；空 = 通用模式
+    "tm_enabled": True,   # 翻译记忆：翻译时参考已确认的相似句对
     "blacklist_processes": [],
     "theme": "dark",
     "popup": {"width": 460, "height": 320},
+}
+
+# 内置示例领域（首次运行/旧配置升级时种入，可直接改删）
+SEED_DOMAINS = {
+    "battery": {
+        "name": "电池/能源",
+        "note": "当前文本属于电池与能源领域（锂离子电池、储能、电化学）。"
+                "按该领域学术惯例翻译：材料与器件名保留通行英文缩写（如 SEI、SOC、CE）"
+                "并在首次出现时附中文全称；术语译法严格遵守下方术语对照。",
+        "enabled": True,
+        "glossary_file": "glossaries/battery.csv",
+        "kb_dirs": [],
+        "kb_enabled": False,
+        "kb_for_translate": False,
+    },
 }
 
 
@@ -152,14 +179,41 @@ def load_config() -> dict:
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 cfg = _deep_merge(DEFAULTS, data)
+                # 旧配置升级：种入示例领域；用户显式写过 "domains"（哪怕空对象）则尊重现状
+                if "domains" not in data:
+                    cfg["domains"] = copy.deepcopy(SEED_DOMAINS)
         except Exception:  # noqa: BLE001 — 坏配置文件也能跑（用默认值）
             log.warning("解析 config.json 失败，使用默认配置", exc_info=True)
     else:
         try:
-            CONFIG_PATH.write_text(json.dumps(DEFAULTS, ensure_ascii=False, indent=2), encoding="utf-8")
+            initial = dict(DEFAULTS)
+            initial["domains"] = copy.deepcopy(SEED_DOMAINS)
+            CONFIG_PATH.write_text(json.dumps(initial, ensure_ascii=False, indent=2), encoding="utf-8")
+            cfg["domains"] = copy.deepcopy(SEED_DOMAINS)
         except Exception:  # noqa: BLE001
             log.warning("写入默认 config.json 失败", exc_info=True)
     return cfg
+
+
+def seed_builtin_glossaries() -> None:
+    """打包版首次运行：把内置示例术语表复制到数据目录（已存在则跳过）。
+
+    源码运行时 DATA_DIR == APP_DIR，本函数自动短路。
+    """
+    builtin = APP_DIR / "glossaries"
+    target = DATA_DIR / "glossaries"
+    if builtin == target or not builtin.is_dir():
+        return
+    for src in builtin.glob("*.csv"):
+        dst = target / src.name
+        if dst.exists():
+            continue
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            log.info("已复制内置术语表：%s", dst)
+        except OSError:
+            log.warning("复制内置术语表失败：%s", src, exc_info=True)
 
 
 def save_config(cfg: dict) -> None:
@@ -205,6 +259,10 @@ class OllamaChecker(QObject):
 
 class SearchBridge(QObject):
     finished = Signal(int, object)  # (seq, results)；结果为空表示检索失败/无结果
+
+
+class KbBridge(QObject):
+    status = Signal(str)  # 后台索引线程 → 设置页状态回写（跨线程走队列连接）
 
 
 class _SearchTask:
@@ -269,21 +327,30 @@ class App(QObject):
         self.bridge = CaptureBridge(self)
         self.web = SearchBridge(self)
         self.web.finished.connect(self._on_search_done)
+        self.kb_bridge = KbBridge(self)
         self.worker = capture.CaptureWorker(cfg, emit_result=self.bridge.captured.emit)
         self.llm = llm.LlmClient(cfg, self)
         self.monitor = Monitor(cfg)
         self.icon = IconWindow(cfg)
+        self.kb = knowledge.KnowledgeStore(DATA_DIR / "kb_index")
+        self.tmstore = tm.TmStore(DATA_DIR / "tm")
+        self._kb_busy = False
+        self._kb_dirs_signature: tuple[str, ...] = ()
         self.popup = PopupWindow(cfg)
         self.popup.input_requested.connect(self.on_input_translate)
         self.popup.tab_changed.connect(self._update_backend_label)
+        self.popup.domain_changed.connect(self.set_domain)
+        self.popup.tm_save_requested.connect(self.on_tm_save)
         self.toast = Toast()
         self.status = StatusWindow()
         self.status.test_requested.connect(self.test_translation)
         self.status.input_requested.connect(self.open_input_translation)
         self.status.settings_requested.connect(self.open_settings)
         self.status.quit_requested.connect(self.quit)
-        self.settings = SettingsWindow(cfg)
+        self.settings = SettingsWindow(cfg, DATA_DIR, self.kb, self.tmstore)
         self.settings.saved.connect(self.on_settings_saved)
+        self.settings.rebuild_requested.connect(self.on_kb_rebuild)
+        self.kb_bridge.status.connect(self.settings.set_kb_status)
         self.tray = TrayIcon(actions={
             "show_status": self.open_status,
             "open_input": self.open_input_translation,
@@ -291,11 +358,18 @@ class App(QObject):
             "pause": self.toggle_pause,
             "web_search_enabled": self._web_enabled(),
             "set_web_search": self.set_web_search,
+            "domain_items": self._domain_pairs,
+            "active_domain": lambda: domains.resolve_active(self._cfg),
+            "set_domain": self.set_domain,
             "open_config": self.open_config_file,
             "autostart_enabled": startup.is_enabled(),
             "set_autostart": self.set_autostart,
             "exit": self.quit,
         }, parent=self)
+        active = domains.resolve_active(self._cfg)
+        pairs = self._domain_pairs()
+        self.popup.set_domains(pairs, active)
+        self.tray.set_domains(pairs, active)
 
         self._debounce = QTimer(self, singleShot=True, interval=int(cfg.get("debounce_ms", 150)))
         self._debounce.timeout.connect(self._fire_debounced)
@@ -327,6 +401,7 @@ class App(QObject):
         self.tray.show()
         self.worker.start()
         self.monitor.start()
+        self._maybe_refresh_kb()  # 有知识库目录时后台增量刷新索引
         if self._cfg.get("show_startup_window", False):
             self.status.show_status()
         QTimer.singleShot(0, self._startup)
@@ -465,15 +540,22 @@ class App(QObject):
         self.tray.act_web.blockSignals(True)
         self.tray.act_web.setChecked(self._web_enabled())
         self.tray.act_web.blockSignals(False)
+        # 领域配置可能增删改：同步弹窗/托盘的学科选项与激活状态
+        active = domains.resolve_active(self._cfg)
+        pairs = self._domain_pairs()
+        self.popup.set_domains(pairs, active)
+        self.tray.set_domains(pairs, active)
         self._update_backend_label()
+        self._maybe_refresh_kb()
         if self._needs_local():
             self.llm.preheat()
-        log.info("设置已保存（provider=%s, offline=%s）",
-                 self._cfg.get("provider"), self._cfg.get("offline"))
+        log.info("设置已保存（provider=%s, offline=%s, domains=%s）",
+                 self._cfg.get("provider"), self._cfg.get("offline"), len(pairs) - 1)
 
     def on_input_translate(self, text: str, target) -> None:
         messages = [
-            {"role": "system", "content": self._input_prompt(target)},
+            {"role": "system",
+             "content": self._compose_system("input", text, base=self._input_prompt(target))},
             {"role": "user", "content": text},
         ]
         self._last_input = (text, target)
@@ -566,11 +648,163 @@ class App(QObject):
             )
         log.info("联网查询：%s", enabled)
 
+    # —— 领域适配（学科模式）
+
+    def _domain_pairs(self) -> list[tuple[str, str]]:
+        """弹窗/托盘的学科选项：[(id, 显示名)]，通用恒在首位。"""
+        return [("", "通用")] + [
+            (did, dom.get("name") or did) for did, dom in domains.enabled_domains(self._cfg)
+        ]
+
+    def set_domain(self, domain_id: str) -> None:
+        """切换激活领域：写配置并持久化，同步弹窗/托盘，下次请求即生效。"""
+        if domain_id and not any(did == domain_id
+                                 for did, _ in domains.enabled_domains(self._cfg)):
+            domain_id = ""
+        if domain_id == domains.resolve_active(self._cfg):
+            return
+        self._cfg["active_domain"] = domain_id
+        save_config(self._cfg)
+        pairs = self._domain_pairs()
+        self.popup.set_domains(pairs, domain_id)
+        self.tray.set_domains(pairs, domain_id)
+        self._update_backend_label()
+        name = next((n for d, n in pairs if d == domain_id), domain_id)
+        x, y = cursor_physical()
+        self.toast.show_at(x, y, f"学科：{name}")
+        log.info("切换学科：%s", name)
+
+    def _compose_system(self, kind: str, text: str, base: str | None = None,
+                        search_context: str = "") -> str:
+        """统一组装 system prompt：
+
+        基础 prompts[kind] → 领域说明 → 术语对照 → 知识库片段 → 参考译例(TM) → 联网检索
+        各段存在才拼；领域段只在激活了领域时追加，翻译记忆通用模式也生效。
+        """
+        if base is None:
+            base = self._cfg["prompts"][kind]
+        parts = [base]
+        dom = domains.active_domain(self._cfg)
+        if dom is not None:
+            did = domains.resolve_active(self._cfg)
+            note = domains.domain_note_text(dom)
+            if note:
+                parts.append(note)
+            glossary = domains.matched_glossary_text(DATA_DIR, did, dom, text)
+            if glossary:
+                parts.append(glossary)
+            kb_context = knowledge.context_for(self.kb, dom, kind, text)
+            if kb_context:
+                parts.append(kb_context)
+        if self._cfg.get("tm_enabled", True) and kind in ("translate", "input"):
+            tm_context = self.tmstore.example_context(
+                domains.resolve_active(self._cfg), text)
+            if tm_context:
+                parts.append(tm_context)
+        if search_context:
+            parts.append(search_context)
+        return "\n\n".join(part for part in parts if part)
+
+    def _chat_domain_context(self) -> str:
+        """追问的领域上下文：领域说明 + 原文命中的术语（不检索 KB/TM，避免噪音）。"""
+        dom = domains.active_domain(self._cfg)
+        if dom is None:
+            return ""
+        parts = [domains.domain_note_text(dom)]
+        if self._sel is not None:
+            did = domains.resolve_active(self._cfg)
+            parts.append(domains.matched_glossary_text(DATA_DIR, did, dom, self._sel.text))
+        return "\n\n".join(part for part in parts if part)
+
+    def on_tm_save(self, kind: str) -> None:
+        """弹窗「存为记忆」：编辑译文后写入当前领域的翻译记忆。"""
+        if self._sel is None:
+            return
+        translation = self.popup.result_text(kind)
+        if not translation.strip():
+            x, y = cursor_physical()
+            self.toast.show_at(x, y, "当前没有可保存的译文")
+            return
+        dialog = TmEditDialog(self._sel.text, translation)
+        if dialog.exec() != TmEditDialog.Accepted:
+            return
+        did = domains.resolve_active(self._cfg)
+        if self.tmstore.append(did, self._sel.text, dialog.translation()):
+            x, y = cursor_physical()
+            self.toast.show_at(x, y, "已存入翻译记忆")
+            log.info("翻译记忆已保存（domain=%s）", did or "general")
+
+    def _kb_dirs_all(self) -> list[str]:
+        """所有已启用领域声明的知识库目录并集（索引按并集建一次）。"""
+        out: list[str] = []
+        for _, dom in domains.enabled_domains(self._cfg):
+            if dom.get("kb_enabled"):
+                out.extend(d for d in (dom.get("kb_dirs") or []) if d)
+        return sorted(set(out))
+
+    def _maybe_refresh_kb(self, force: bool = False) -> None:
+        """知识库目录集合变化时后台增量刷新索引。"""
+        dirs = self._kb_dirs_all()
+        signature = tuple(dirs)
+        if not force and signature == self._kb_dirs_signature:
+            return
+        if not dirs and not force:
+            self._kb_dirs_signature = signature
+            return
+        self._kb_dirs_signature = signature
+        self._refresh_kb_async(dirs)
+
+    def _refresh_kb_async(self, dirs: list[str]) -> None:
+        if self._kb_busy or not dirs:
+            return
+        self._kb_busy = True
+
+        def run() -> None:
+            try:
+                stats = self.kb.refresh(dirs)
+                log.info("知识库索引完成：%s", stats)
+            except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
+                log.exception("知识库索引刷新失败")
+            finally:
+                self._kb_busy = False
+
+        threading.Thread(target=run, name="kb-refresh", daemon=True).start()
+
+    def on_kb_rebuild(self) -> None:
+        """设置页「重建索引」：强制后台重建并回写状态。"""
+        if self._kb_busy:
+            self.settings.set_kb_status("索引进行中，请稍候…")
+            return
+        dirs = self._kb_dirs_all()
+        if not dirs:
+            self.settings.set_kb_status("请先为领域添加知识库目录并启用")
+            return
+        self.settings.set_kb_status("正在重建索引…")
+        self._kb_busy = True
+        self._kb_dirs_signature = tuple(dirs)
+
+        def run() -> None:
+            try:
+                stats = self.kb.refresh(dirs)
+                summary = (f"索引完成：{stats['files']} 个文件 · {stats['chunks']} 个片段"
+                           f"（新解析 {stats['parsed']}，失败 {stats['errors']}）")
+                log.info("知识库索引完成：%s", stats)
+            except Exception as e:  # noqa: BLE001
+                summary = f"索引失败：{e}"
+                log.exception("知识库索引重建失败")
+            finally:
+                self._kb_busy = False
+            self.kb_bridge.status.emit(summary)  # 跨线程信号 → GUI 线程回写
+
+        threading.Thread(target=run, name="kb-rebuild", daemon=True).start()
+
     # —— 后端/地址显示
 
     def _backend_text(self, kind: str) -> str:
+        dom = domains.active_domain(self._cfg)
+        prefix = f"{dom.get('name') or '?'} · " if dom else ""
         if self._cfg.get("offline"):
-            return "离线模式（仅本地）"
+            return prefix + "离线模式（仅本地）"
         if llm.provider_for(self._cfg, kind) == "openai":
             cloud = self._cfg.get("cloud") or {}
             host = urllib.parse.urlparse(cloud.get("base_url") or "").hostname or "?"
@@ -579,7 +813,7 @@ class App(QObject):
             txt = f"本地 · {self._cfg.get('model') or '?'}"
         if kind in ("explain", "chat") and self._web_enabled():
             txt += " · 联网"
-        return txt
+        return prefix + txt
 
     def _update_backend_label(self, kind: str | None = None) -> None:
         self.popup.set_backend(self._backend_text(kind or self.popup.current_kind()))
@@ -696,14 +930,12 @@ class App(QObject):
     def _request_kind(self, kind: str, search_context: str = "") -> None:
         if self._sel is None:
             return
-        if search_context:
-            messages = [
-                {"role": "system", "content": self._cfg["prompts"][kind] + "\n\n" + search_context},
-                {"role": "user", "content": self._sel.text},
-            ]
-            self.llm.request(kind, self._sel.text, messages=messages)
-        else:
-            self.llm.request(kind, self._sel.text)
+        messages = [
+            {"role": "system",
+             "content": self._compose_system(kind, self._sel.text, search_context=search_context)},
+            {"role": "user", "content": self._sel.text},
+        ]
+        self.llm.request(kind, self._sel.text, messages=messages)
         self.popup.mark_pending(kind, t0=time.perf_counter())
 
     def on_switched(self, kind: str) -> None:
@@ -751,6 +983,7 @@ class App(QObject):
         messages = build_messages(
             self._cfg, self._sel.text, translation,
             self.popup.result_text("explain"), self._chat_history, question, search_context,
+            domain_context=self._chat_domain_context(),
         )
         self.popup.mark_pending("chat", t0=time.perf_counter())
         self.llm.request("chat", question, messages=messages)
@@ -901,6 +1134,7 @@ class App(QObject):
 def main() -> None:
     setup_logging()
     cfg = load_config()
+    seed_builtin_glossaries()
     provider = cfg.get("provider", "ollama")
     model = (cfg.get("cloud") or {}).get("model") if provider == "openai" else cfg.get("model")
     log.info("启动：provider=%s model=%s", provider, model)

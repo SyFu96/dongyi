@@ -9,8 +9,10 @@ CHAT_PROMPT = (
 
 def build_messages(cfg: dict, source: str, translation: str, explanation: str,
                    history: list[dict[str, str]], question: str,
-                   search_context: str = "") -> list[dict[str, str]]:
+                   search_context: str = "", domain_context: str = "") -> list[dict[str, str]]:
     prompt = cfg.get("prompts", {}).get("chat", CHAT_PROMPT)
+    if domain_context:
+        prompt = prompt + "\n\n" + domain_context
     context = f"\n\n原文：\n{source}"
     if translation:
         context += f"\n\n已有译文：\n{translation}"

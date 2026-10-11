@@ -25,6 +25,7 @@
 - **本地模型**：可连接本机 [Ollama](https://ollama.com/)；离线使用条件见[配置说明](docs/CONFIG.md)。
 - **云端模型**：可接入支持流式 Chat Completions 的 OpenAI 兼容服务（DeepSeek、Qwen、GLM、Kimi 等）。
 - **联网检索**：解释和追问可参考搜索结果；检索失败时使用模型自身知识。
+- **领域适配**：按学科切换提示词与强制术语表；可指向个人文献文件夹做知识库检索（RAG），确认过的译文自动积累为翻译记忆，详见 [docs/DOMAINS.md](docs/DOMAINS.md)。
 
 ## 快速开始
 
@@ -76,6 +77,7 @@ uv run python app.py
 
 - 详细用法 → [docs/USAGE.md](docs/USAGE.md)
 - 配置字段与模型 / 联网 / 离线 → [docs/CONFIG.md](docs/CONFIG.md)
+- 领域适配与个人知识库 → [docs/DOMAINS.md](docs/DOMAINS.md)
 - 排错与已知限制 → [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 - 开发、测试、打包 → [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
 

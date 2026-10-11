@@ -13,23 +13,28 @@ uv run python app.py    # 启动（日志写 app.log）
 
 | 文件 | 职责 |
 |---|---|
-| `app.py` | 入口与主编排：加载配置 → 探测/预热 → 监听 → Qt 循环 |
+| `app.py` | 入口与主编排：加载配置 → 探测/预热 → 监听 → Qt 循环；`_compose_system` 统一组装领域提示词 |
 | `capture.py` | 取词：UIA 读选中文本 + 热键路径的剪贴板兜底 |
 | `trigger.py` | 划词/双击检测、全局热键、浮标窗 |
 | `llm.py` | 双后端流式客户端（本地 Ollama / OpenAI 兼容云端），按标签路由 |
 | `search.py` | 联网检索客户端（Ollama 托管 `web_search`，可中断） |
+| `domains.py` | 领域配置解析、术语表 CSV 加载/命中匹配/注入格式化 |
+| `knowledge.py` | 个人知识库：文档解析(txt/md/csv/json/pdf/docx)、分块、BM25 索引与检索 |
+| `tm.py` | 翻译记忆：句对存储、相似度检索、参考译例注入 |
 | `netutil.py` | 不跟随重定向的 URL 打开（本机探测/刷新用） |
-| `conversation.py` | 追问上下文组装 |
-| `popup.py` | 弹窗（译文/解释/追问/输入翻译 四标签）、托盘、浮标、Toast |
-| `settings.py` | 图形化设置窗口 |
+| `conversation.py` | 追问上下文组装（含领域上下文注入） |
+| `popup.py` | 弹窗（译文/解释/追问/输入翻译 四标签）、托盘、浮标、Toast、记忆编辑对话框 |
+| `settings.py` | 图形化设置窗口（模型/联网/领域与知识库管理） |
 | `instance.py` | 单实例（命名互斥量 + 本地套接字） |
 | `startup.py` | 开机自启动快捷方式（源码用 `launch.vbs`，exe 指向自身） |
+
+数据文件（与 `config.json` 同目录）：`glossaries/<领域id>.csv` 术语表、`kb_index/` 知识库索引、`tm/<领域id>.jsonl` 翻译记忆。
 
 ## 测试
 
 ```powershell
-# 启动、置顶、追问、取消请求的自动回归（CI 也跑这三组）
-uv run python -m unittest test_startup test_features test_interaction -v
+# 启动、置顶、追问、取消请求与领域适配的自动回归（CI 也跑这七组）
+uv run python -m unittest test_startup test_features test_interaction test_domains test_knowledge test_tm test_domain_integration -v
 
 # LLM 链路：流式翻译 + 解释，打印首字延迟/总耗时
 uv run python test_llm.py
