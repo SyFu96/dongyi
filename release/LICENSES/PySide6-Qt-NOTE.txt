@@ -1,0 +1,17 @@
+PySide6 / shiboken6 / Qt 6.11.2
+==============================
+本程序以 LGPLv3 路径使用 Qt for Python（PySide6）与 Qt。
+
+随 PySide6 wheel 的 dist-info 仅含商业许可声明文件（LicenseRef-Qt-Commercial.txt），
+不构成开源许可材料。开源使用所需的许可与版权声明请见上游：
+
+- Qt for Python 许可说明: https://doc.qt.io/qtforpython-6.11/licenses.html
+- Qt 6.11 使用的许可:     https://doc.qt.io/qt-6.11/licenses-used-in-qt.html
+- Qt 6.11 模块许可:       https://doc.qt.io/qt-6.11/licensing.html
+- LGPLv3 全文:            本目录 LGPL-3.0.txt
+
+注意：随包可能包含 Qt Virtual Keyboard（GPLv3，而非 LGPLv3）等模块；
+本项目的 GPL-3.0-only 与之兼容，但仍需对应的 Qt 源码（见 SOURCE_CODE.md）。
+
+Qt 源码:      https://download.qt.io/archive/qt/6.11/6.11.2/single/
+PySide6 源码: https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.2-src/

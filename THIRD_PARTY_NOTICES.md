@@ -8,11 +8,16 @@
 | 组件 | 许可 | 分发二进制时的要点 |
 |---|---|---|
 | PySide6 / shiboken6 | LGPL-3.0（另有 GPL / 商业选项） | Qt for Python。需遵守 LGPLv3：提供许可文本、对应源码获取方式，并保证用户可用兼容的替换库运行 |
-| pynput | LGPL-3.0 | 同上（LGPLv3 义务） |
+| Qt（含 Qt Virtual Keyboard、Qt PDF 等随包模块） | 逐模块；常用模块 LGPLv3，**Qt Virtual Keyboard 为 GPLv3** | 按实际打包模块核对许可与第三方声明；本项目 GPL-3.0-only 与之兼容 |
+| pynput | LGPL-3.0 | 同上（LGPLv3 义务）；纯 Python 模块，采用源码重组路径 |
 | pywin32 | PSF（上游含混合许可组件） | 按上游各组件的许可文件处理 |
 | uiautomation | Apache-2.0 | 保留版权与许可声明 |
 | comtypes | MIT | 保留版权与许可声明 |
 | six | MIT | 保留版权与许可声明 |
+| packaging | Apache-2.0 / BSD | 保留版权与许可声明 |
+| setuptools（含内嵌组件） | MIT 及内嵌组件各自许可 | 保留实际内嵌组件的声明 |
+| Python 运行时 | PSF | 保留 Python 许可及相关版权声明 |
+| OpenSSL（Qt 附带） | Apache-2.0 | 保留版权与声明 |
 
 ## 说明
 
@@ -28,6 +33,8 @@
 - 所分发 **LGPL 组件**（Qt/PySide6、pynput）的**对应源码获取方式与重建说明**；
 - 随包的**许可文本**：`LICENSE`（GPL-3.0）、本文件、LGPLv3 / GPLv3 全文，以及 PySide6/shiboken6、pynput、pywin32、uiautomation、comtypes、six 与实际打包组件（含 Python 运行时）各自的许可声明；
 - 一个 `SHA256SUMS` 校验文件。
+
+本仓库 `release/` 目录即为发布二进制准备的合规材料：`release/LICENSES/`（许可文本）、`release/SOURCE_CODE.md`（对应源码位置）、`release/BUILDING.md`（重建/替换）、`release/README.txt`（用户说明）。
 
 > 采用开源 GPL/LGPL 路径即需履行上述义务；若已购买 Qt 商业许可，可按其条款处理。
 

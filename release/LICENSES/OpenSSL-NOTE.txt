@@ -1,0 +1,5 @@
+OpenSSL（Qt 运行时附带）
+=======================
+Qt 在 Windows 上可能附带 OpenSSL 的 libssl/libcrypto。OpenSSL 采用 Apache-2.0。
+许可文本与版权声明见上游：https://www.openssl.org/source/license.html
+对应源码：https://www.openssl.org/source/
