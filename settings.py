@@ -51,6 +51,17 @@ HYBRID_KINDS = {"translate": "ollama", "input": "ollama", "explain": "openai", "
 DEFAULT_LOCAL_URL = "http://localhost:11434"
 
 
+class _NoWheelCombo(QComboBox):
+    """未获得焦点时忽略滚轮：滚动设置页经过下拉框时不会误改选项，
+    滚轮事件交给外层滚动区。展开列表、键盘选择与编辑不受影响。"""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 — Qt 事件覆写
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
 class SettingsWindow(QWidget):
     saved = Signal()
     models_loaded = Signal(list)
@@ -111,7 +122,7 @@ class SettingsWindow(QWidget):
         self.local_url = QLineEdit()
         lf.addRow("地址", self.local_url)
         row = QHBoxLayout()
-        self.local_model = QComboBox()
+        self.local_model = _NoWheelCombo()
         self.local_model.setEditable(True)
         row.addWidget(self.local_model, 1)
         self.btn_refresh = QPushButton("刷新模型")
@@ -176,7 +187,7 @@ class SettingsWindow(QWidget):
         dv.setSpacing(6)
 
         row = QHBoxLayout()
-        self.domain_combo = QComboBox()
+        self.domain_combo = _NoWheelCombo()
         self.domain_combo.currentIndexChanged.connect(
             lambda _index: self._load_domain_form())
         row.addWidget(self.domain_combo, 1)

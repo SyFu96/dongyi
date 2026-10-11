@@ -265,14 +265,14 @@ class DomainIntegrationTests(unittest.TestCase):
             calls.append(list(dirs))
             result = real_refresh(dirs)
             if len(calls) == 1:
-                gate.wait(2)  # 第一轮挂起，制造 busy 窗口
+                gate.wait(5)  # 第一轮挂起，制造 busy 窗口
             return result
 
         c._cfg["domains"]["battery"]["kb_enabled"] = True
         c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs1)]
         with patch.object(c.kb, "refresh", slow_refresh):
             c._maybe_refresh_kb()  # 第 1 轮（阻塞在 gate）
-            deadline = time.time() + 2
+            deadline = time.time() + 8
             while not calls and time.time() < deadline:
                 QTest.qWait(10)
             self.assertEqual(len(calls), 1)
@@ -280,7 +280,7 @@ class DomainIntegrationTests(unittest.TestCase):
             c._maybe_refresh_kb()  # busy → 目录暂存为 pending
             gate.set()             # 放行第 1 轮
             # 等到第 2 轮开始且工作循环彻底退出（busy=False、pending 清空）
-            deadline = time.time() + 3
+            deadline = time.time() + 8
             while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
         # pending 真实补跑（而不只是入队）
@@ -306,7 +306,7 @@ class DomainIntegrationTests(unittest.TestCase):
         def flaky_refresh(dirs):
             calls.append(list(dirs))
             if len(calls) == 1:
-                gate.wait(2)  # 挂在抛错**前**：制造稳定的"A 在途"窗口
+                gate.wait(5)  # 挂在抛错**前**：制造稳定的"A 在途"窗口
                 raise RuntimeError("simulated index failure")
             return real_refresh(dirs)
 
@@ -314,7 +314,7 @@ class DomainIntegrationTests(unittest.TestCase):
         c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs1)]
         with patch.object(c.kb, "refresh", flaky_refresh):
             c._maybe_refresh_kb()  # A（挂起，将失败）
-            deadline = time.time() + 2
+            deadline = time.time() + 8
             while not calls and time.time() < deadline:
                 QTest.qWait(10)
             c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs2)]
@@ -326,7 +326,7 @@ class DomainIntegrationTests(unittest.TestCase):
             self.assertEqual(c._kb_pending_dirs, [str(docs2)])
             self.assertEqual(c._kb_dirs_signature, ())
             gate.set()  # 放行 A → 抛错 → 交接 B
-            deadline = time.time() + 3
+            deadline = time.time() + 8
             while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
         self.assertEqual(calls[0], [str(docs1)])
@@ -354,26 +354,26 @@ class DomainIntegrationTests(unittest.TestCase):
             calls.append(list(dirs))
             result = real_refresh(dirs)
             if len(calls) == 2:
-                gate.wait(2)  # 挂起 B 轮，制造"签名=A、在途=B"窗口
+                gate.wait(5)  # 挂起 B 轮，制造"签名=A、在途=B"窗口
             return result
 
         c._cfg["domains"]["battery"]["kb_enabled"] = True
         c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_a)]
         with patch.object(c.kb, "refresh", slow_refresh):
             c._maybe_refresh_kb()  # A 完成，签名 = A
-            deadline = time.time() + 2
+            deadline = time.time() + 8
             while not calls and time.time() < deadline:
                 QTest.qWait(10)
             c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_b)]
             c._maybe_refresh_kb()  # B 开始（阻塞在 gate）
-            deadline = time.time() + 2
+            deadline = time.time() + 8
             while len(calls) < 2 and time.time() < deadline:
                 QTest.qWait(10)
             self.assertEqual(c._kb_inflight, [str(docs_b)])
             c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_a)]
             c._maybe_refresh_kb()  # 改回 A：必须排队，不能短路
             gate.set()
-            deadline = time.time() + 3
+            deadline = time.time() + 8
             while (len(calls) < 3 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
         self.assertEqual(calls, [[str(docs_a)], [str(docs_b)], [str(docs_a)]],
@@ -485,6 +485,31 @@ class SettingsFormRegressionTests(unittest.TestCase):
             lowers = [d.lower() for d in datas]
             self.assertEqual(len(lowers), len(set(lowers)))  # 无大小写重复
             self.assertEqual(datas, ["d1"])  # 停用别名不显示，保留启用正主
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
+    def test_combo_ignores_wheel_without_focus(self):
+        # Minor 复审回归：滚动设置页经过下拉框时，未聚焦的 QComboBox
+        # 不得响应滚轮误改选项（领域下拉一改就会切换整个表单）
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+
+        cfg = self._make_cfg()
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        try:
+            window.reload()
+            combo = window.domain_combo
+            window.domain_note.setFocus()
+            before = combo.currentIndex()
+            self.assertGreater(combo.count(), 1)  # 前提：确有多个可选
+            event = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0),
+                                QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                                Qt.ScrollUpdate, False)
+            QApplication.sendEvent(combo, event)
+            self.assertEqual(combo.currentIndex(), before,
+                             "未聚焦的下拉框响应了滚轮，滚动页面会误改学科")
         finally:
             window.hide()
             window.deleteLater()

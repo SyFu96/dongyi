@@ -215,6 +215,24 @@ def _parse_docx(path: Path) -> str:
 # ---------------------------------------------------------------- 索引与检索
 
 
+def _identity(p) -> str:
+    """路径的规范身份：realpath 展开短名与链接后 normcase 归一。
+
+    同一文件无论以短名、长名还是链接别名访问，身份一致。
+    索引键、目录归属、排除规则一律用身份比较；返回给界面的来源路径
+    保留扫描时的原始拼写。
+    """
+    try:
+        resolved = os.path.realpath(os.path.abspath(str(p)))
+    except OSError:  # noqa: PERF——realpath 极少抛错，兜底 abspath
+        resolved = os.path.abspath(str(p))
+    return os.path.normcase(resolved)
+
+
+def _dir_prefix(d) -> str:
+    return _identity(d).rstrip("\\/") + os.sep
+
+
 def _build_stats(chunks: list[dict]) -> tuple[list[dict[str, int]], dict[str, int], float]:
     """对一批 chunks 建检索统计：(每块词频, 词→块数, 平均块长)。
 
@@ -235,15 +253,6 @@ def _build_stats(chunks: list[dict]) -> tuple[list[dict[str, int]], dict[str, in
     return counts, df, avgdl
 
 
-def _norm_dir(d: str) -> str:
-    """目录归一化（小写、去尾部斜杠），用于按前缀过滤分块归属。"""
-    return os.path.normcase(os.path.abspath(d)).rstrip("\\/") + os.sep
-
-
-def _norm_file(p) -> str:
-    return os.path.normcase(os.path.abspath(str(p)))
-
-
 class KnowledgeStore:
     """全局索引：files 记录每个文件的 mtime/size/分块数，chunks 保存文本。
 
@@ -257,14 +266,14 @@ class KnowledgeStore:
     防止用户把项目目录设为知识库后密钥被索引并外发）。".git" 目录始终排除。
     """
 
-    VERSION = 2  # v2：文件记录带 complete 字段；旧版索引直接废弃重建（顺带清掉历史敏感残留）
+    VERSION = 3  # v3：chunk 带身份字段（normcase(realpath)）；旧版索引废弃重建
 
     def __init__(self, index_dir: Path, exclude: "list[str | Path] | None" = None) -> None:
         self._dir = index_dir
         self._path = index_dir / "index.json"
         self._lock = threading.Lock()
-        self._files: dict[str, dict] = {}
-        self._chunks: list[dict] = []  # {"path": str, "text": str}
+        self._files: dict[str, dict] = {}  # 键 = 路径身份
+        self._chunks: list[dict] = []  # {"id": 身份, "path": 原始拼写, "text": str}
         self._index_gen = 0            # chunks 变化时 +1
         self._built_gen = -1           # 统计缓存对应的代数
         self._stats_chunks: list[dict] = []  # 统计对应的同代 chunks 快照（引用）
@@ -272,10 +281,9 @@ class KnowledgeStore:
         self._df: dict[str, int] = {}
         self._avgdl = 1.0
         self._building = False  # 后台统计构建进行中（防止重复调度）
-        # 每条排除规则同时按文件精确匹配与目录前缀匹配（目录可能尚不存在，
-        # 无法靠 is_dir() 判别，两种都试最稳妥）
-        self._exclude_rules = [(_norm_file(p), _norm_dir(str(p)))
-                               for p in [*_default_excludes(index_dir), *(exclude or [])]]
+        # 排除规则保留原始路径，扫描时按身份（realpath 归一）比较——
+        # 短名/链接别名访问同一文件无法绕过排除（防密钥文件进索引）
+        self._exclude_paths = [*_default_excludes(index_dir), *(exclude or [])]
         self._load()
         if self._chunks:  # 磁盘索引已有内容：走统一调度入口预热统计（占用 _building）
             self._stats_ready_or_schedule()
@@ -304,13 +312,12 @@ class KnowledgeStore:
             threading.Thread(target=self._preheat, name="kb-preheat", daemon=True).start()
         return None
 
-    def _excluded(self, path: Path) -> bool:
-        normalized = _norm_file(path)
-        for file_rule, dir_rule in self._exclude_rules:
-            if normalized == file_rule or normalized.startswith(dir_rule):
+    def _excluded(self, path_id: str, rule_prefixes: list[tuple[str, str]]) -> bool:
+        """按身份判断是否命中排除规则（短名/链接别名访问同一文件无法绕过）。"""
+        for file_id, dir_prefix in rule_prefixes:
+            if path_id == file_id or path_id.startswith(dir_prefix):
                 return True
-        parts = path.parts
-        return any(part == ".git" for part in parts[:-1]) or path.name == ".git"
+        return False
 
     # —— 持久化
 
@@ -344,7 +351,10 @@ class KnowledgeStore:
         统计（分词/df/avgdl）在本方法内随新索引一次性原子换入——发布即可检索，
         GUI 线程永远不会撞上"统计未建好"的窗口。
         """
-        wanted: dict[str, tuple[float, int]] = {}
+        # 排除规则按身份（realpath 展开短名/链接）比较，一次刷新只解析一次
+        rule_prefixes = [(_identity(r), _dir_prefix(r)) for r in self._exclude_paths]
+        wanted: dict[str, tuple[tuple[float, int], str]] = {}  # 身份 → (时间戳, 原始拼写)
+        dir_ids: dict[str, str] = {}  # 目录拼写 → 目录身份缓存：realpath 每目录只做一次
         for d in dirs:
             root = Path(d)
             if not root.is_dir():
@@ -352,7 +362,16 @@ class KnowledgeStore:
             for path in root.rglob("*"):
                 if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTS:
                     continue
-                if self._excluded(path):
+                parts = path.parts
+                if any(part == ".git" for part in parts[:-1]) or path.name == ".git":
+                    continue  # 版本库内部数据永远不入索引
+                parent_id = dir_ids.get(str(path.parent))
+                if parent_id is None:
+                    parent_id = dir_ids[str(path.parent)] = _identity(path.parent)
+                # 文件身份 = 目录身份 + 文件名：目录别名（短名/链接）防得住，
+                # 又不必对每个文件做 realpath（杀软实时扫描下代价高）
+                path_id = parent_id + os.sep + os.path.normcase(path.name)
+                if self._excluded(path_id, rule_prefixes):
                     continue
                 try:
                     stat = path.stat()
@@ -360,47 +379,47 @@ class KnowledgeStore:
                     continue
                 if stat.st_size > MAX_FILE_BYTES:
                     continue
-                # 用 abspath 而不是 resolve()：CI/网络盘上临时目录常是 8.3 短名
-                # （RUNNER~1），resolve 会展开成另一个字符串，导致目录前缀过滤
-                # 与测试断言全部失配。存储/过滤/排除统一用 abspath 口径。
-                wanted[os.path.abspath(path)] = (stat.st_mtime, stat.st_size)
+                wanted[path_id] = ((stat.st_mtime, stat.st_size), str(path))
 
         with self._lock:
-            old_by_path: dict[str, list[dict]] = {}
+            old_by_id: dict[str, list[dict]] = {}
             for chunk in self._chunks:
-                old_by_path.setdefault(chunk["path"], []).append(chunk)
+                old_by_id.setdefault(chunk["id"], []).append(chunk)
 
         parsed = errors = 0
         new_chunks: list[dict] = []
         indexed: dict[str, dict] = {}
         hit_total_cap = False
-        for path_str, (mtime, size) in sorted(wanted.items()):
+        # 按显示拼写排序保证截断顺序确定；键是身份
+        for path_id, ((mtime, size), display) in sorted(wanted.items(),
+                                                        key=lambda kv: kv[1][1]):
             room = MAX_TOTAL_CHUNKS - len(new_chunks)
             if room <= 0:
                 hit_total_cap = True
                 break
-            record = self._files.get(path_str)
+            record = self._files.get(path_id)
             reusable = None
             if (record and record.get("complete", False)
                     and record.get("mtime") == mtime and record.get("size") == size):
-                reusable = old_by_path.get(path_str)
+                reusable = old_by_id.get(path_id)
             if reusable is not None:
                 kept = reusable[:room]  # 缓存复用同样受额度约束
                 new_chunks.extend(kept)
-                indexed[path_str] = {"mtime": mtime, "size": size, "chunks": len(kept),
-                                     "complete": len(kept) == len(reusable)}
+                indexed[path_id] = {"mtime": mtime, "size": size, "chunks": len(kept),
+                                    "complete": len(kept) == len(reusable)}
                 continue
             try:
-                pieces = chunk_text(parse_file(Path(path_str), MAX_TEXT_CHARS))
+                pieces = chunk_text(parse_file(Path(display), MAX_TEXT_CHARS))
             except Exception as e:  # noqa: BLE001 — 单文件失败跳过（下次刷新重试）
-                log.warning("知识库解析失败 %s：%s", path_str, e)
+                log.warning("知识库解析失败 %s：%s", display, e)
                 errors += 1
                 continue
             parsed += 1
             take = pieces[:room]
-            new_chunks.extend({"path": path_str, "text": piece} for piece in take)
-            indexed[path_str] = {"mtime": mtime, "size": size, "chunks": len(take),
-                                 "complete": len(pieces) <= room}
+            new_chunks.extend({"id": path_id, "path": display, "text": piece}
+                              for piece in take)
+            indexed[path_id] = {"mtime": mtime, "size": size, "chunks": len(take),
+                                "complete": len(pieces) <= room}
         if hit_total_cap:
             log.warning("知识库片段总数达到上限 %s，其余文件未索引", MAX_TOTAL_CHUNKS)
 
@@ -456,9 +475,9 @@ class KnowledgeStore:
             return []
         allowed = None
         if dirs:
-            prefixes = tuple(_norm_dir(d) for d in dirs if d)
+            prefixes = tuple(_dir_prefix(d) for d in dirs if d)
             allowed = {i for i, c in enumerate(chunks)
-                       if c["path"].lower().startswith(prefixes)}
+                       if c["id"].startswith(prefixes)}  # 身份前缀：别名访问同一目录也能命中
             if not allowed:
                 return []
 
@@ -491,10 +510,10 @@ class KnowledgeStore:
         with self._lock:
             files = dict(self._files)
         if dirs:
-            prefixes = tuple(_norm_dir(d) for d in dirs if d)
-            chunks = [c for c in chunks if c["path"].lower().startswith(prefixes)]
-            paths = {c["path"] for c in chunks}
-            files = {p: v for p, v in files.items() if p in paths}
+            prefixes = tuple(_dir_prefix(d) for d in dirs if d)
+            chunks = [c for c in chunks if c["id"].startswith(prefixes)]
+            ids = {c["id"] for c in chunks}
+            files = {p: v for p, v in files.items() if p in ids}
         return {"files": len(files), "chunks": len(chunks)}
 
 

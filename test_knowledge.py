@@ -143,13 +143,13 @@ class KnowledgeStoreTests(unittest.TestCase):
             store = knowledge.KnowledgeStore(self.index_dir)
             stats = store.refresh([str(self.docs)])
             self.assertEqual(stats["chunks"], 3)  # a 完整 2 块 + b 被截到 1 块
-            self.assertFalse(store._files[str(self.docs / "b.txt")]["complete"])
+            self.assertFalse(store._files[knowledge._identity(str(self.docs / "b.txt"))]["complete"])
             # 无容量变化：b 重解析仍被截断
             store.refresh([str(self.docs)])
-            self.assertFalse(store._files[str(self.docs / "b.txt")]["complete"])
+            self.assertFalse(store._files[knowledge._identity(str(self.docs / "b.txt"))]["complete"])
             (self.docs / "a.txt").unlink()  # 释放容量
             store.refresh([str(self.docs)])
-            record = store._files[str(self.docs / "b.txt")]
+            record = store._files[knowledge._identity(str(self.docs / "b.txt"))]
             self.assertTrue(record["complete"])
             self.assertEqual(record["chunks"], 2)
             self.assertIn("丁", store.search("丁丁", dirs=[str(self.docs)])[0]["text"])
@@ -157,12 +157,12 @@ class KnowledgeStoreTests(unittest.TestCase):
             # b（完整缓存 2 块）只能保留 1 块 → complete=False，等待补齐
             self._write("0.txt", "\n\n".join(["戊" * 300, "己" * 300]))
             store.refresh([str(self.docs)])
-            record = store._files[str(self.docs / "b.txt")]
+            record = store._files[knowledge._identity(str(self.docs / "b.txt"))]
             self.assertFalse(record["complete"], "完整缓存被挤占后应标记不完整")
             self.assertEqual(record["chunks"], 1)
             (self.docs / "0.txt").unlink()  # 容量再释放
             store.refresh([str(self.docs)])
-            record = store._files[str(self.docs / "b.txt")]
+            record = store._files[knowledge._identity(str(self.docs / "b.txt"))]
             self.assertTrue(record["complete"])
             self.assertEqual(record["chunks"], 2)
 
@@ -211,6 +211,30 @@ class KnowledgeStoreTests(unittest.TestCase):
         hits = store.search("磷酸铁锂", dirs=[str(self.docs)])
         self.assertTrue(hits)
         self.assertIn("磷酸铁锂", hits[0]["text"])
+
+    def test_alias_paths_cannot_bypass_exclusion_or_split_index(self):
+        # Major 复审回归：短名/链接别名访问同一目录时——
+        # ① 排除规则仍生效（config.json 不得借别名进索引）；
+        # ② 别名扫描、真实路径过滤也能命中（目录归属按身份判断）；
+        # ③ 同一文件经两种别名刷新只算一个，不产生重复条目。
+        import _winapi
+
+        secret = self._write("config.json", 'cloud api key SK-FAKE-ALIAS-KEY battery')
+        alias = Path(self.tmp.name) / "docs_alias"
+        try:
+            _winapi.CreateJunction(str(self.docs), str(alias))
+        except Exception as e:  # noqa: BLE001 — 非 NTFS/权限不足则跳过
+            self.skipTest(f"无法创建 junction：{e}")
+        self._write("keep.txt", "alpha corpus text")
+
+        store = knowledge.KnowledgeStore(self.index_dir, exclude=[secret])
+        store.refresh([str(alias)])  # 用别名目录扫描
+        self.assertEqual(store.search("SK-FAKE-ALIAS-KEY"), [], "排除被别名绕过")
+
+        store.refresh([str(self.docs)])  # 换真实路径再刷：应识别为同一批文件
+        self.assertEqual(store.stats()["files"], 1)
+        hits = store.search("alpha", dirs=[str(alias)])  # 反向：别名过滤也命中
+        self.assertTrue(hits, "别名目录过滤与真实路径扫描身份不一致")
 
     def test_docx_tables_are_indexed(self):
         docx_path = self.docs / "table.docx"
