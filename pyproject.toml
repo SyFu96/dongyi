@@ -1,7 +1,7 @@
 [project]
-name = "huayi"
+name = "dongyi"
 version = "0.1.0"
-description = "Windows 桌面划词翻译工具：本地 Ollama 与云端混合、解释/追问、联网检索（PySide6）"
+description = "Windows 桌面划词翻译工具：学科适配、术语表、个人知识库与翻译记忆；本地 Ollama 与云端混合（PySide6）"
 readme = "README.md"
 license = "GPL-3.0-only"
 requires-python = ">=3.13"
@@ -30,5 +30,5 @@ dependencies = [
 dev = ["pyinstaller>=6.10"]
 
 [project.urls]
-Repository = "https://github.com/SyFu96/huayi"
-Issues = "https://github.com/SyFu96/huayi/issues"
+Repository = "https://github.com/SyFu96/dongyi"
+Issues = "https://github.com/SyFu96/dongyi/issues"

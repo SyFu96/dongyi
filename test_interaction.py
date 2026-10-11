@@ -9,7 +9,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 from pynput.keyboard import Key, KeyCode
 
-import app as huayi
+import app as dongyi
 import trigger
 from popup import PopupWindow
 
@@ -82,7 +82,7 @@ class HotkeyTests(unittest.TestCase):
     def test_word_safe_defaults_require_shift_and_full_combo(self):
         for letter, kind in (("t", "translate"), ("e", "explain")):
             with self.subTest(kind=kind):
-                self.monitor = trigger.Monitor(huayi.DEFAULTS)
+                self.monitor = trigger.Monitor(dongyi.DEFAULTS)
                 self.events = QSignalSpy(self.monitor.hotkey)
                 self.listener = self.monitor._keys
                 self.held = {Key.ctrl, Key.alt}

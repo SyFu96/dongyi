@@ -1,9 +1,9 @@
 ## 下载与运行
 
-Windows x64 用户下载 `huayi-v0.1.0-windows-x64.zip`，**完整解压**后双击 `huayi.exe`（无需安装 Python）。
+Windows x64 用户下载 `dongyi-v0.1.0-windows-x64.zip`，**完整解压**后双击 `dongyi.exe`（无需安装 Python）。
 
 - 本地翻译需自行安装 [Ollama](https://ollama.com/) 并下载模型；云端翻译需在「设置…」里配置自己的 OpenAI 兼容 API。
-- 配置与日志保存在 `%APPDATA%\huayi\`。
+- 配置与日志保存在 `%APPDATA%\dongyi\`。
 - 本版本为**首次公开测试版（Alpha）**。
 
 ## 主要功能
@@ -14,11 +14,11 @@ Windows x64 用户下载 `huayi-v0.1.0-windows-x64.zip`，**完整解压**后双
 
 ## 许可与对应源码
 
-划译采用 **GPL-3.0-only**；第三方组件遵循各自许可，完整许可与版权声明见包内
+懂译采用 **GPL-3.0-only**；第三方组件遵循各自许可，完整许可与版权声明见包内
 `LICENSE`、`LICENSES/` 与 `THIRD_PARTY_NOTICES.md`。
 
 - 本次二进制对应 tag：`v0.1.0`，commit：`<COMMIT>`
-- 项目源码：<https://github.com/SyFu96/huayi/archive/refs/tags/v0.1.0.zip>（另附 `huayi-v0.1.0-source.zip`）
+- 项目源码：<https://github.com/SyFu96/dongyi/archive/refs/tags/v0.1.0.zip>（另附 `dongyi-v0.1.0-source.zip`）
 - 依赖对应源码、版本、修改情况：`release/SOURCE_CODE.md`
 - 重建与替换 LGPL 组件：`release/BUILDING.md`
 

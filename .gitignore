@@ -22,4 +22,4 @@ glossaries/*
 dist/
 build/
 *.spec
-!huayi.spec
+!dongyi.spec

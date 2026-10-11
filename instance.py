@@ -18,7 +18,7 @@ class SingleInstance(QObject):
     def __init__(self, project_dir: Path, parent: QObject | None = None) -> None:
         super().__init__(parent)
         identity = str(project_dir.resolve()).casefold().encode("utf-8")
-        self.name = "huayi-" + hashlib.sha256(identity).hexdigest()[:24]
+        self.name = "dongyi-" + hashlib.sha256(identity).hexdigest()[:24]
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self._accept)
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -38,7 +38,7 @@ class SingleInstance(QObject):
             self._mutex = handle
             if not self.server.listen(self.name):
                 self.close()
-                raise RuntimeError("无法建立划译实例服务：" + self.server.errorString())
+                raise RuntimeError("无法建立懂译实例服务：" + self.server.errorString())
             return True
         self._kernel32.CloseHandle(handle)
         client = QLocalSocket()
@@ -51,7 +51,7 @@ class SingleInstance(QObject):
             # 首个实例可能刚取得互斥量，还没来得及监听管道。
             time.sleep(0.02)
         else:
-            raise RuntimeError("无法建立划译实例连接：" + self.server.errorString())
+            raise RuntimeError("无法建立懂译实例连接：" + self.server.errorString())
         client.write(b"show\n")
         client.flush()
         if client.bytesToWrite():

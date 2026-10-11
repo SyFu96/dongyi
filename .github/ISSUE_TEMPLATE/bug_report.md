@@ -1,6 +1,6 @@
 ---
 name: Bug 报告
-about: 报告一个问题，帮助改进划译
+about: 报告一个问题，帮助改进懂译
 title: "[Bug] "
 labels: bug
 ---
@@ -18,7 +18,7 @@ labels: bug
 ## 实际结果
 
 ## 环境
-- 划译版本 / commit：
+- 懂译版本 / commit：
 - Windows 版本：
 - 模型后端：本地 Ollama（模型名：____）/ 云端 API（服务商：____）/ 混合
 - 是否开启联网检索：

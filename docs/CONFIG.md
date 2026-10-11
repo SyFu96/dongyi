@@ -3,7 +3,8 @@
 配置写在 `config.json`：
 
 - 源码运行时：项目目录下的 `config.json`（首次运行自动生成）。
-- 打包版（exe）：`%APPDATA%\huayi\config.json`（若该目录不可写会退回系统临时目录）。
+- 打包版（exe）：`%APPDATA%\dongyi\config.json`（若该目录不可写会退回系统临时目录）。
+- 从旧版（划译 huayi）升级：首次启动会自动把整个 `%APPDATA%\huayi\` 数据目录迁移为 `%APPDATA%\dongyi\`，配置、术语表、知识库索引与翻译记忆全部保留。
 
 > 用「设置…」窗口保存的改动（模型 / API / 联网 / 离线）**立即生效**；手工编辑文件后需**重启**。
 

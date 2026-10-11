@@ -3,10 +3,10 @@
 
 用法：
     uv sync
-    uv run pyinstaller --noconfirm huayi.spec
+    uv run pyinstaller --noconfirm dongyi.spec
 
-产出 dist/huayi/（目录包，便于检查依赖、满足 LGPL 的可替换性；见 THIRD_PARTY_NOTICES.md）。
-运行 dist/huayi/huayi.exe 即可；配置与日志写入 %APPDATA%\\huayi\\。
+产出 dist/dongyi/（目录包，便于检查依赖、满足 LGPL 的可替换性；见 THIRD_PARTY_NOTICES.md）。
+运行 dist/dongyi/dongyi.exe 即可；配置与日志写入 %APPDATA%\\dongyi\\。
 """
 
 from PyInstaller.utils.hooks import collect_all
@@ -22,7 +22,7 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=binaries,
-    datas=datas + [("assets/huayi.ico", "assets"),
+    datas=datas + [("assets/dongyi.ico", "assets"),
                    ("glossaries/battery.csv", "glossaries")],  # 只带内置表，个人术语表不入包
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -38,14 +38,14 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="huayi",
+    name="dongyi",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=False,
     disable_windowed_traceback=False,
-    icon="assets/huayi.ico",
+    icon="assets/dongyi.ico",
 )
 coll = COLLECT(
     exe,
@@ -53,5 +53,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="huayi",
+    name="dongyi",
 )

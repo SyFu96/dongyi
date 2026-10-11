@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 import win32gui
 
-import app as huayi
+import app as dongyi
 from capture import Selection
 from popup import app_theme_qss
 
@@ -56,9 +56,9 @@ def stop_after_first_chunk(controller, kind):
 def main():
     qt = QApplication([])
     qt.setQuitOnLastWindowClosed(False)
-    cfg = huayi.load_config()
+    cfg = dongyi.load_config()
     qt.setStyleSheet(app_theme_qss(cfg["theme"]))
-    controller = huayi.App(cfg)
+    controller = dongyi.App(cfg)
     try:
         controller._sel = Selection(text="The battery stores energy.")
         controller._icon_anchor = (300, 250)
@@ -111,7 +111,7 @@ def main():
         assert controller.popup._source_text == next_source
         assert controller._chat_history == []
         assert not controller.icon.isVisible()
-        preview_dir = Path(tempfile.mkdtemp(prefix="huayi-ui-"))
+        preview_dir = Path(tempfile.mkdtemp(prefix="dongyi-ui-"))
         preview = preview_dir / "popup.png"
         controller.popup.grab().save(str(preview))
         print(json.dumps({"translation": translation, "first_answer": first,

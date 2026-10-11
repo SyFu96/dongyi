@@ -219,7 +219,7 @@ class DragHandle(QLabel):
     """只在标题区域拖动窗口，不影响译文选字、按钮或追问输入。"""
 
     def __init__(self, parent: QWidget) -> None:
-        super().__init__("划译 · 拖动这里移动窗口", parent)
+        super().__init__("懂译 · 拖动这里移动窗口", parent)
         self.setObjectName("statusLabel")
         self.setCursor(Qt.SizeAllCursor)
         self.setMinimumHeight(22)
@@ -693,7 +693,7 @@ class PopupWindow(QWidget):
 
     def _render_chat(self) -> None:
         self.chat_view.setPlainText("\n\n".join(
-            f"你：{question}\n\n划译：{answer}" for question, answer in self._chat_turns
+            f"你：{question}\n\n懂译：{answer}" for question, answer in self._chat_turns
         ))
 
     def result_text(self, kind: str) -> str:
@@ -968,7 +968,7 @@ class TrayIcon(QSystemTrayIcon):
     def __init__(self, actions: dict, parent=None) -> None:
         super().__init__(self._make_icon(), parent)
         self._actions = actions
-        self.setToolTip("划译 — 本地划词翻译")
+        self.setToolTip("懂译 — 本地划词翻译")
         self.activated.connect(
             lambda reason: actions["show_status"]()
             if reason in (self.ActivationReason.Trigger, self.ActivationReason.DoubleClick)
@@ -1037,14 +1037,14 @@ class StatusWindow(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("划译 — 本地划词翻译")
+        self.setWindowTitle("懂译 — 本地划词翻译")
         self.setWindowIcon(TrayIcon._make_icon())
         self.setObjectName("popupRoot")
         self.setMinimumWidth(460)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
-        title = QLabel("划译已启动")
+        title = QLabel("懂译已启动")
         title.setStyleSheet("font-size:18pt;font-weight:bold;")
         layout.addWidget(title)
         self.listener_status = QLabel("监听已开启")
@@ -1089,7 +1089,7 @@ class StatusWindow(QWidget):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        log.info("打开划译启动窗口")
+        log.info("打开懂译启动窗口")
 
     def set_model_status(self, ok: bool, message: str) -> None:
         self.model_status.setText(message)

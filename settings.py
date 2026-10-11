@@ -65,7 +65,7 @@ class SettingsWindow(QWidget):
         self._tm = tm_store
         self._domains: dict = {}
         self._loading_form = False  # 表单载入期间阻断控件信号回写工作副本
-        self.setWindowTitle("划译 — 设置")
+        self.setWindowTitle("懂译 — 设置")
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # 置顶，避免被划词弹窗挡住
         self.resize(640, 880)
         self.setMinimumWidth(560)
@@ -423,7 +423,7 @@ class SettingsWindow(QWidget):
         dom = self._domains.get(did) or {}
         name = dom.get("name") or did
         answer = QMessageBox.question(
-            self, "划译", f"删除领域「{name}」？（术语表与索引文件不会被删除）")
+            self, "懂译", f"删除领域「{name}」？（术语表与索引文件不会被删除）")
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._domains.pop(did, None)
@@ -458,7 +458,7 @@ class SettingsWindow(QWidget):
                 value = str(path)
             self._domains.setdefault(did, {})["glossary_file"] = value
         except OSError:
-            QMessageBox.warning(self, "划译", f"创建术语表失败：{path}")
+            QMessageBox.warning(self, "懂译", f"创建术语表失败：{path}")
             return
         self._edit_glossary()
         self._refresh_domain_status()
@@ -473,7 +473,7 @@ class SettingsWindow(QWidget):
         try:
             os.startfile(path)  # noqa: S606 — 用户主动操作
         except OSError:
-            QMessageBox.warning(self, "划译", f"无法打开术语表：{path}")
+            QMessageBox.warning(self, "懂译", f"无法打开术语表：{path}")
 
     # —— 知识库目录
 
@@ -528,7 +528,7 @@ class SettingsWindow(QWidget):
             return
         name = (self._domains.get(did) or {}).get("name") or did
         answer = QMessageBox.question(
-            self, "划译", f"清空领域「{name}」的全部翻译记忆？")
+            self, "懂译", f"清空领域「{name}」的全部翻译记忆？")
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._tm.clear(did)

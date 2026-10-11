@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""划译入口：加载配置 → 检查 Ollama → 预热 → 起监听 → Qt 循环。
+"""懂译入口：加载配置 → 检查 Ollama → 预热 → 起监听 → Qt 循环。
 
 用 pythonw 启动（无控制台窗口），日志写 app.log：
     .venv\\Scripts\\pythonw.exe app.py
@@ -77,8 +77,17 @@ def _writable_data_dir() -> Path:
     for base in candidates:
         if not base:
             continue
-        d = Path(base) / "huayi"
+        d = Path(base) / "dongyi"
         try:
+            if not d.exists():
+                # 从旧名（划译 huayi）升级：把整个数据目录搬过来，
+                # 配置/术语表/知识库索引/翻译记忆全部保留
+                legacy = Path(base) / "huayi"
+                if legacy.is_dir():
+                    try:
+                        os.replace(legacy, d)
+                    except OSError:
+                        pass  # 迁移失败不阻塞启动：老目录仍在，用户可手动搬
             d.mkdir(parents=True, exist_ok=True)
             return d
         except Exception:  # noqa: BLE001
@@ -94,7 +103,7 @@ else:
 CONFIG_PATH = DATA_DIR / "config.json"
 LOG_PATH = DATA_DIR / "app.log"
 
-log = logging.getLogger("huayi")
+log = logging.getLogger("dongyi")
 
 DEFAULTS = {
     "provider": "ollama",  # "ollama"（本地）| "openai"（任意 OpenAI 兼容云端）
@@ -429,7 +438,7 @@ class App(QObject):
         if not self._needs_local():
             # 全云端：无需探测/启动本地服务，直接标记就绪。
             self.llm.preheat()
-            log.info("划译已启动（provider=%s, model=%s）",
+            log.info("懂译已启动（provider=%s, model=%s）",
                      self._cfg.get("provider"), (self._cfg.get("cloud") or {}).get("model"))
             return
         checker = OllamaChecker(self)
@@ -437,7 +446,7 @@ class App(QObject):
         checker.checked.connect(checker.deleteLater)
         threading.Thread(target=lambda: checker.checked.emit(self._probe_ollama()),
                          name="ollama-check", daemon=True).start()
-        log.info("划译已启动（provider=%s, model=%s）", self._cfg.get("provider"), self._cfg["model"])
+        log.info("懂译已启动（provider=%s, model=%s）", self._cfg.get("provider"), self._cfg["model"])
 
     def _probe_ollama(self) -> bool:
         if self._cfg.get("offline"):
@@ -458,7 +467,7 @@ class App(QObject):
         else:
             self._start_local_ollama()
             self.status.set_model_status(False, "等待本地翻译服务启动，将自动重试…")
-            self.tray.setToolTip("划译 — 等待 Ollama 启动")
+            self.tray.setToolTip("懂译 — 等待 Ollama 启动")
             self._startup_retry.start()
 
     def _start_local_ollama(self) -> None:
@@ -488,7 +497,7 @@ class App(QObject):
 
     def on_warmup_finished(self, ok: bool, message: str) -> None:
         self.status.set_model_status(ok, message)
-        self.tray.setToolTip("划译 — 模型已就绪" if ok else "划译 — 模型暂不可用")
+        self.tray.setToolTip("懂译 — 模型已就绪" if ok else "懂译 — 模型暂不可用")
         if not ok:
             self._startup_retry.start()
 
@@ -584,7 +593,7 @@ class App(QObject):
         log.info("输入翻译请求（target=%s, chars=%s）", target, len(text))
 
     def quit(self) -> None:
-        log.info("退出划译")
+        log.info("退出懂译")
         try:
             self.monitor.stop()
             self.worker.stop()
@@ -618,7 +627,7 @@ class App(QObject):
             self.tray.act_autostart.blockSignals(True)
             self.tray.act_autostart.setChecked(startup.is_enabled())
             self.tray.act_autostart.blockSignals(False)
-            self.tray.showMessage("划译", "开机自启动设置失败，请查看日志。")
+            self.tray.showMessage("懂译", "开机自启动设置失败，请查看日志。")
 
     def _web_enabled(self) -> bool:
         if self._cfg.get("offline"):
@@ -632,7 +641,7 @@ class App(QObject):
             self.tray.act_web.blockSignals(True)
             self.tray.act_web.setChecked(False)
             self.tray.act_web.blockSignals(False)
-            self.tray.showMessage("划译 — 离线模式", "已开启离线模式（offline=true），联网检索不可用。")
+            self.tray.showMessage("懂译 — 离线模式", "已开启离线模式（offline=true），联网检索不可用。")
             return
         if enabled and not search.has_key(ws):
             # 无 key：回弹开关并提示配置方式，避免"开了却一直检索失败"。
@@ -641,7 +650,7 @@ class App(QObject):
             self.tray.act_web.blockSignals(False)
             ws["enabled"] = False
             self.tray.showMessage(
-                "划译 — 无法联网",
+                "懂译 — 无法联网",
                 "请在 config.json 的 web_search.api_key 填写 Ollama API key，"
                 "或设置环境变量 OLLAMA_API_KEY 后重启。",
             )
@@ -653,7 +662,7 @@ class App(QObject):
         self._update_backend_label()
         if enabled:
             self.tray.showMessage(
-                "划译 — 联网查询已开启",
+                "懂译 — 联网查询已开启",
                 "解释会把原文、追问会把本轮问题发送到 ollama.com 检索；敏感内容请关闭此开关。",
             )
         log.info("联网查询：%s", enabled)
@@ -1163,7 +1172,7 @@ class App(QObject):
     def on_finished(self, kind: str, full_text: str) -> None:
         self._startup_retry.stop()
         self.status.set_model_status(True, "模型已就绪，可以划词翻译。")
-        self.tray.setToolTip("划译 — 模型已就绪")
+        self.tray.setToolTip("懂译 — 模型已就绪")
         if kind == "chat" and self._chat_pending_question is not None:
             self._chat_history.extend([
                 {"role": "user", "content": self._chat_pending_question},
@@ -1196,11 +1205,11 @@ def main() -> None:
     )
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("划译")
+    app.setApplicationName("懂译")
 
     instance = SingleInstance(APP_DIR, app)
     if not instance.acquire():
-        log.info("划译已在后台运行")
+        log.info("懂译已在后台运行")
         return
     controller = App(cfg)
     instance.activated.connect(lambda: log.info("忽略重复启动，保留当前后台实例"))
@@ -1213,9 +1222,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        log.exception("划译启动失败")
+        log.exception("懂译启动失败")
         # pythonw 没有控制台；启动异常必须能让桌面用户看见。
         ctypes.windll.user32.MessageBoxW(
-            None, f"划译启动失败，请查看日志：\n{LOG_PATH}", "划译", 0x10
+            None, f"懂译启动失败，请查看日志：\n{LOG_PATH}", "懂译", 0x10
         )
         raise

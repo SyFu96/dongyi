@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""划译场景基准：三个本地模型的翻译速度对比（流式，测 TTFT 与 tokens/s）"""
+"""懂译场景基准：三个本地模型的翻译速度对比（流式，测 TTFT 与 tokens/s）"""
 import json, time, urllib.request
 
 URL = "http://localhost:11434/api/chat"
@@ -18,7 +18,7 @@ def run(model, warm=False):
         ],
     }
     if not warm:
-        body["think"] = False  # 划译不要思考过程
+        body["think"] = False  # 懂译不要思考过程
     req = urllib.request.Request(
         URL, data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")

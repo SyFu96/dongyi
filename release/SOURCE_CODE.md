@@ -1,14 +1,14 @@
 # 对应源码（SOURCE_CODE）
 
-本文件说明本二进制（`huayi-v0.1.0-windows-x64.zip`）**对应版本**的源码获取位置。
+本文件说明本二进制（`dongyi-v0.1.0-windows-x64.zip`）**对应版本**的源码获取位置。
 按 **GPLv3 第 6(d) 条**，源码通过网络免费提供；若链接失效，请在本仓库提交 Issue，发布者负责恢复可获取性。
 
 ## 本项目
 
 | 项 | 位置 |
 |---|---|
-| 划译 v0.1.0（含构建脚本与依赖锁） | `https://github.com/SyFu96/huayi/archive/refs/tags/v0.1.0.zip` |
-| 同版本源码资产 | `huayi-v0.1.0-source.zip`（Release 附件） |
+| 懂译 v0.1.0（含构建脚本与依赖锁） | `https://github.com/SyFu96/dongyi/archive/refs/tags/v0.1.0.zip` |
+| 同版本源码资产 | `dongyi-v0.1.0-source.zip`（Release 附件） |
 
 ## 依赖（实际分发组件）
 

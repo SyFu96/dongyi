@@ -12,7 +12,7 @@ from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
-import app as huayi
+import app as dongyi
 import domains
 from capture import Selection
 from test_features import FakeLlm
@@ -25,22 +25,22 @@ class ConfigSeedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.json"
             cfg_path.write_text('{"provider": "ollama"}', encoding="utf-8")
-            with patch.object(huayi, "CONFIG_PATH", cfg_path):
-                cfg = huayi.load_config()
+            with patch.object(dongyi, "CONFIG_PATH", cfg_path):
+                cfg = dongyi.load_config()
             self.assertIn("battery", cfg["domains"])
             self.assertEqual(cfg["active_domain"], "")
 
             cfg_path.write_text('{"domains": {"mine": {"name": "我的"}}}', encoding="utf-8")
-            with patch.object(huayi, "CONFIG_PATH", cfg_path):
-                cfg2 = huayi.load_config()
+            with patch.object(dongyi, "CONFIG_PATH", cfg_path):
+                cfg2 = dongyi.load_config()
             self.assertNotIn("battery", cfg2["domains"])
             self.assertIn("mine", cfg2["domains"])
 
     def test_missing_config_written_with_seed(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "config.json"
-            with patch.object(huayi, "CONFIG_PATH", cfg_path):
-                cfg = huayi.load_config()
+            with patch.object(dongyi, "CONFIG_PATH", cfg_path):
+                cfg = dongyi.load_config()
             self.assertTrue(cfg_path.exists())
             self.assertIn("battery", cfg["domains"])
 
@@ -58,21 +58,21 @@ class DomainIntegrationTests(unittest.TestCase):
         (self.base / "glossaries").mkdir()
         (self.base / "glossaries" / "battery.csv").write_text(
             "SEI,固体电解质界面,缩写可保留\nintercalation,嵌入\n", encoding="utf-8-sig")
-        self.cfg = deepcopy(huayi.DEFAULTS)
+        self.cfg = deepcopy(dongyi.DEFAULTS)
         self.cfg["domains"] = {"battery": {
             "name": "电池/能源", "note": "电池与能源领域文献。", "enabled": True,
             "glossary_file": "glossaries/battery.csv", "kb_dirs": [],
             "kb_enabled": False, "kb_for_translate": False}}
         self.cfg["active_domain"] = ""
         for p in (
-            patch.object(huayi.llm, "LlmClient", FakeLlm),
-            patch.object(huayi.startup, "is_enabled", return_value=False),
-            patch.object(huayi, "DATA_DIR", self.base),
-            patch.object(huayi, "CONFIG_PATH", self.base / "config.json"),
+            patch.object(dongyi.llm, "LlmClient", FakeLlm),
+            patch.object(dongyi.startup, "is_enabled", return_value=False),
+            patch.object(dongyi, "DATA_DIR", self.base),
+            patch.object(dongyi, "CONFIG_PATH", self.base / "config.json"),
         ):
             p.start()
             self.addCleanup(p.stop)
-        self.controller = huayi.App(self.cfg)
+        self.controller = dongyi.App(self.cfg)
 
     def tearDown(self):
         c = self.controller
@@ -207,7 +207,7 @@ class DomainIntegrationTests(unittest.TestCase):
 
             Accepted = 1
 
-        with patch.object(huayi, "TmEditDialog", ShouldNotConstruct):
+        with patch.object(dongyi, "TmEditDialog", ShouldNotConstruct):
             c.on_tm_save("explain")
         self.assertEqual(constructed, [])
         self.assertEqual(c.tmstore.count("battery"), 0)
@@ -239,7 +239,7 @@ class DomainIntegrationTests(unittest.TestCase):
             def translation(self):
                 return self._translation
 
-        with patch.object(huayi, "TmEditDialog", FakeDialog):
+        with patch.object(dongyi, "TmEditDialog", FakeDialog):
             c.on_tm_save("translate")
         entries = c.tmstore._load("battery")[0]  # 领域快照 = battery
         self.assertEqual(len(entries), 1)
@@ -403,7 +403,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
         cls.qt = QApplication.instance() or QApplication([])
 
     def _make_cfg(self):
-        cfg = deepcopy(huayi.DEFAULTS)
+        cfg = deepcopy(dongyi.DEFAULTS)
         cfg["domains"] = {
             "d1": {"name": "领域一", "note": "说明一", "enabled": True,
                    "glossary_file": "", "kb_dirs": ["D:/kb/one"],
@@ -416,7 +416,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
 
     def test_open_switch_and_save_keeps_domains_intact(self):
         cfg = self._make_cfg()
-        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         try:
             window.reload()
             combo = window.domain_combo
@@ -445,7 +445,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
         cfg = self._make_cfg()
         cfg["domains"]["d2"].update({"kb_dirs": ["D:/kb/two"], "kb_enabled": True,
                                      "enabled": True})
-        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         captured: list = []
         window.rebuild_requested.connect(lambda dirs: captured.append(list(dirs)))
         try:
@@ -469,7 +469,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
         # m2 回归：大小写别名不进设置页，且保留者与运行时一致。
         # 必须按"D1 停用在前、d1 启用在后"构造——若启用者在前，
         # 简单的"取第一个"实现也能通过，测不出保留者偏好规则
-        cfg = deepcopy(huayi.DEFAULTS)
+        cfg = deepcopy(dongyi.DEFAULTS)
         cfg["domains"] = {
             "D1": {"name": "d1 的停用别名", "enabled": False, "kb_dirs": [],
                    "kb_enabled": False},
@@ -477,7 +477,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
         }
         # 与运行时保留者一致：两层都应保留启用的 d1
         self.assertEqual([did for did, _ in domains.enabled_domains(cfg)], ["d1"])
-        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         try:
             window.reload()
             datas = [window.domain_combo.itemData(i)
@@ -493,7 +493,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
     def test_empty_domains_form_is_safe(self):
         cfg = self._make_cfg()
         cfg["domains"] = {}
-        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         try:
             window.reload()
             self.assertEqual(window.domain_combo.count(), 0)

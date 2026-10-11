@@ -1,8 +1,10 @@
 <div align="center">
 
-# 划译 · huayi
+# 懂译 · dongyi
 
-**Windows 划词翻译工具，支持本地和云端模型。**
+**越来越懂你的翻译。**
+
+**Windows 划词翻译工具，支持本地和云端模型；学科切换、强制术语表、个人知识库与翻译记忆，让它越用越懂你的专业领域。**
 
 ![License](https://img.shields.io/badge/license-GPL--3.0--only-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4)
@@ -50,7 +52,7 @@
 
 ### 直接下载（推荐）
 
-到 [**Releases**](https://github.com/SyFu96/huayi/releases) 下载 `huayi-v0.1.0-windows-x64.zip`，**完整解压**后双击 `huayi.exe`。打包版无需安装 Python；当前为公开测试版。
+到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载最新 windows-x64 压缩包（改名前发布的历史包可能仍以 `huayi-` 开头，内容相同），**完整解压**后双击其中的 `dongyi.exe`（旧包为 `huayi.exe`）。打包版无需安装 Python；当前为公开测试版。
 
 - 本地翻译：先装 [Ollama](https://ollama.com/)，再拉一个模型：
 
@@ -68,8 +70,8 @@
 需要 Windows、Git 和 [uv](https://docs.astral.sh/uv/)（自动管理 Python 3.13+）：
 
 ```powershell
-git clone https://github.com/SyFu96/huayi.git
-cd huayi
+git clone https://github.com/SyFu96/dongyi.git
+cd dongyi
 uv sync
 uv run python app.py
 ```
@@ -91,7 +93,7 @@ uv run python app.py
 
 ## 配置
 
-首次运行自动生成 `config.json`（打包版写在 `%APPDATA%\huayi\`）。字段说明见
+首次运行自动生成 `config.json`（打包版写在 `%APPDATA%\dongyi\`）。字段说明见
 [`config.example.json`](config.example.json) 和 [docs/CONFIG.md](docs/CONFIG.md)。
 
 ## 文档

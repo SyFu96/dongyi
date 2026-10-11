@@ -55,10 +55,10 @@ CI（GitHub Actions）在 `windows-latest` 上以 `QT_QPA_PLATFORM=offscreen` �
 
 ```powershell
 uv sync
-uv run pyinstaller --noconfirm huayi.spec
+uv run pyinstaller --noconfirm dongyi.spec
 ```
 
-产出 `dist/huayi/`（**onedir** 目录包），运行其中的 `huayi.exe`。打包版配置与日志写入 `%APPDATA%\huayi\`。
+产出 `dist/dongyi/`（**onedir** 目录包），运行其中的 `dongyi.exe`。打包版配置与日志写入 `%APPDATA%\dongyi\`。
 
 发布二进制前请阅读 [`release/`](../release)（许可、对应源码、重建/替换说明）与 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)：
 PySide6 / pynput 为 LGPLv3，分发二进制时需随包提供相应许可文本与源码/替换方式。

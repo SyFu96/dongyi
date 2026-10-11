@@ -11,7 +11,7 @@ from PySide6.QtGui import QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-import app as huayi
+import app as dongyi
 import llm
 from capture import Selection
 
@@ -47,8 +47,8 @@ class FeatureTests(unittest.TestCase):
         cls.qt.setQuitOnLastWindowClosed(False)
 
     def setUp(self):
-        with patch.object(huayi.llm, "LlmClient", FakeLlm), patch.object(huayi.startup, "is_enabled", return_value=False):
-            self.controller = huayi.App(deepcopy(huayi.DEFAULTS))
+        with patch.object(dongyi.llm, "LlmClient", FakeLlm), patch.object(dongyi.startup, "is_enabled", return_value=False):
+            self.controller = dongyi.App(deepcopy(dongyi.DEFAULTS))
 
     def tearDown(self):
         c = self.controller
@@ -483,7 +483,7 @@ class RequestTests(unittest.TestCase):
 
         with patch.object(llm.http.client, "HTTPConnection", return_value=ConnectingConnection()):
             with self.assertRaises(llm._StreamAborted):
-                llm.stream_chat(deepcopy(huayi.DEFAULTS), "explain", "long text",
+                llm.stream_chat(deepcopy(dongyi.DEFAULTS), "explain", "long text",
                                 cancelled=stopped.is_set)
 
 

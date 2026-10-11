@@ -12,10 +12,10 @@ uv sync --frozen
 
 # 修改依赖（例如 .venv\Lib\site-packages\pynput 中的源码）后，
 # 用 --no-sync 避免覆盖你的改动：
-uv run --no-sync pyinstaller --clean --noconfirm huayi.spec
+uv run --no-sync pyinstaller --clean --noconfirm dongyi.spec
 
 # 运行重建结果
-.\dist\huayi\huayi.exe
+.\dist\dongyi\dongyi.exe
 ```
 
 ## 替换 LGPL 组件（Qt / PySide6 / shiboken6）

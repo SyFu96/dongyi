@@ -13,11 +13,11 @@ from win32com.shell import shell, shellcon
 FROZEN = getattr(sys, "frozen", False)
 APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 LAUNCH_VBS = APP_DIR / "launch.vbs"
-ICON = APP_DIR / "assets" / "huayi.ico"
+ICON = APP_DIR / "assets" / "dongyi.ico"
 
 
 def startup_shortcut() -> Path:
-    return Path(shell.SHGetFolderPath(0, shellcon.CSIDL_STARTUP, None, 0)) / "划译.lnk"
+    return Path(shell.SHGetFolderPath(0, shellcon.CSIDL_STARTUP, None, 0)) / "懂译.lnk"
 
 
 def is_enabled() -> bool:
@@ -42,7 +42,7 @@ def create_shortcut(path: Path) -> None:
         shortcut.IconLocation = str(ICON)
     shortcut.WorkingDirectory = str(APP_DIR)
     shortcut.WindowStyle = 7
-    shortcut.Description = "划译 — 后台划词翻译与追问"
+    shortcut.Description = "懂译 — 后台划词翻译与追问"
     shortcut.Save()
 
 
@@ -56,7 +56,7 @@ def set_enabled(enabled: bool) -> None:
 
 def install() -> None:
     desktop = Path(shell.SHGetFolderPath(0, shellcon.CSIDL_DESKTOPDIRECTORY, None, 0))
-    create_shortcut(desktop / "划译.lnk")
+    create_shortcut(desktop / "懂译.lnk")
     set_enabled(True)
     print("已更新桌面启动入口，并启用当前用户登录时自动启动。")
 
