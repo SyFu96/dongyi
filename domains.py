@@ -61,24 +61,35 @@ def valid_id(domain_id: str) -> bool:
     return bool(DOMAIN_ID_RE.match(domain_id or ""))
 
 
-def enabled_domains(cfg: dict) -> list[tuple[str, dict]]:
-    """[(id, 配置)]，只保留 id 合法且 enabled 的领域，按 id 排序保证菜单稳定。
+def dedupe_domains(domains_map: dict) -> list[tuple[str, dict]]:
+    """大小写去重后的 [(id, 配置)]，按 id 排序。
 
-    大小写折叠后重复的 id 只保留一个（翻译记忆等按小写落盘，
-    Battery/battery 共存会共用同一份记忆、互相清空）。
+    保留者规则（设置页与运行时必须共用，否则两边选中的别名会不同）：
+    同组内**第一个启用的**优先；全都停用时保留第一个。
+    翻译记忆等按小写落盘，Battery/battery 共存会共用同一份记忆、互相清空。
     """
+    groups: dict[str, list[tuple[str, dict]]] = {}
+    for did, dom in domains_map.items():
+        if not valid_id(did) or not isinstance(dom, dict):
+            continue
+        groups.setdefault(did.lower(), []).append((did, dom))
     out = []
-    seen: set[str] = set()
-    for did, dom in (cfg.get("domains") or {}).items():
-        if not valid_id(did) or not isinstance(dom, dict) or not dom.get("enabled", True):
-            continue
-        key = did.lower()
-        if key in seen:
-            log.warning("领域 id %s 与已有领域仅大小写不同，已忽略该领域配置", did)
-            continue
-        seen.add(key)
-        out.append((did, dom))
+    for members in groups.values():
+        if len(members) > 1:
+            keeper = next((m for m in members if m[1].get("enabled", True)), members[0])
+            log.warning("领域 id %s 与 %s 仅大小写不同，保留 %s",
+                        "、".join(m[0] for m in members if m is not keeper), members[0][0],
+                        keeper[0])
+        else:
+            keeper = members[0]
+        out.append(keeper)
     return sorted(out, key=lambda pair: pair[0])
+
+
+def enabled_domains(cfg: dict) -> list[tuple[str, dict]]:
+    """[(id, 配置)]，只保留 id 合法且 enabled 的领域（大小写去重后）。"""
+    return [(did, dom) for did, dom in dedupe_domains(cfg.get("domains") or {})
+            if dom.get("enabled", True)]
 
 
 def resolve_active(cfg: dict) -> str:

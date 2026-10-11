@@ -143,6 +143,25 @@ class DomainConfigTests(unittest.TestCase):
         self.assertEqual(len(battery_ids), 1)
         self.assertIn("other", [did for did, _ in domains.enabled_domains(cfg)])
 
+    def test_dedupe_keeper_prefers_enabled_member(self):
+        # 保留者规则：组内第一个"启用"的优先（而非简单取第一个）——
+        # 否则设置页显示停用的别名，运行时却用启用的正主，两边操作对象不一致
+        domains_map = {
+            "Battery": {"name": "停用别名", "enabled": False},
+            "battery": {"name": "启用正主", "enabled": True},
+        }
+        keepers = dict(domains.dedupe_domains(domains_map))
+        self.assertIn("battery", keepers)
+        self.assertNotIn("Battery", keepers)
+        cfg = {"domains": domains_map}
+        self.assertEqual([did for did, _ in domains.enabled_domains(cfg)], ["battery"])
+        # 全组停用：保留第一个
+        all_disabled = {
+            "A1": {"name": "甲", "enabled": False},
+            "a1": {"name": "乙", "enabled": False},
+        }
+        self.assertEqual([did for did, _ in domains.dedupe_domains(all_disabled)], ["A1"])
+
     def test_resolve_active_falls_back_to_general(self):
         cfg = {"domains": {"battery": {"name": "电池", "enabled": True}},
                "active_domain": "missing"}

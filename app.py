@@ -767,22 +767,24 @@ class App(QObject):
         self._start_kb_worker(dirs, signature)
 
     def _kb_target_satisfied(self, signature: tuple[str, ...]) -> bool:
-        """目标目录是否无需再刷新。
+        """目标目录是否无需再刷新（宁可多刷一次，不可漏刷）。
 
-        - 已完成该目标，且没有在途/待办任务会用其他目录覆盖索引；
-        - 或该目标正在刷新 / 已在待办队列中（不重复排队）。
-        只比对"已完成签名"不够：签名=A、在途=B 时改回 A，若在此短路，
-        B 完成后索引就与当前配置不一致了。
+        - 待办里已有**其他**目标 → 本目标必须排队：那个目标完成后会覆盖索引；
+        - 目标已在待办 / 正在刷新 → 无需重复；
+        - 目标已完成且无任何在途/待办覆盖 → 无需刷新。
         """
         with self._kb_lock:
-            if signature == self._kb_dirs_signature:
-                if self._kb_inflight is None and self._kb_pending_dirs is None:
-                    return True
-                return False
-            if self._kb_inflight is not None and tuple(self._kb_inflight) == signature:
-                return True
-            if self._kb_pending_dirs is not None and tuple(self._kb_pending_dirs) == signature:
-                return True
+            pending = self._kb_pending_dirs
+            inflight = self._kb_inflight
+            done = self._kb_dirs_signature
+        if pending is not None and tuple(pending) != signature:
+            return False  # 排在别的目标后面，索引最终将是那个目标
+        if pending is not None and tuple(pending) == signature:
+            return True
+        if inflight is not None and tuple(inflight) == signature:
+            return True
+        if signature == done and inflight is None:
+            return True
         return False
 
     def _start_kb_worker(self, dirs: list[str], signature: tuple[str, ...] | None = None) -> None:
@@ -792,6 +794,9 @@ class App(QObject):
                 self._kb_pending_dirs = list(dirs)
                 return
             self._kb_busy = True
+            # inflight 与 busy 同锁设置：消除"busy 已置、inflight 未置"窗口，
+            # 否则该窗口内改回已完成配置会被 target_satisfied 误判为已达成
+            self._kb_inflight = list(dirs)
         threading.Thread(target=self._kb_worker_run, args=(list(dirs), signature),
                          name="kb-refresh", daemon=True).start()
 
@@ -799,13 +804,11 @@ class App(QObject):
         """索引工作循环：串行消费 pending，交接在同一把锁内完成（无窗口）。
 
         - 签名只在刷新成功后提交：失败轮不提交，但同样交接 pending（不丢待办）；
-        - busy 的清除与 pending 的读取在同一锁持有期内：期间任何新请求
-          都会先看到 busy=True 并写入 pending，随后被本循环取走，不会丢失。
+        - busy/inflight 的清除与 pending 的读取在同一锁持有期内：期间任何新
+          请求都会先看到 busy=True 并写入 pending，随后被本循环取走，不会丢失。
         """
         current, current_sig = dirs, signature
         while current is not None:
-            with self._kb_lock:
-                self._kb_inflight = list(current)
             ok = False
             try:
                 stats = self.kb.refresh(current)

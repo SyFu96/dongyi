@@ -74,10 +74,13 @@ class KnowledgeStoreTests(unittest.TestCase):
         thread_errors: list[Exception] = []
         stop = threading.Event()
         refresh_count = {"n": 0}
+        queries_started = threading.Event()
 
         def refresher() -> None:
-            n = 0
             try:
+                if not queries_started.wait(3):
+                    return  # 查询未开始（异常情形）：由主线程的计数断言兜底
+                n = 0
                 while not stop.is_set():
                     text = gen_b if n % 2 == 0 else gen_a
                     (self.docs / "f0.txt").write_text(text, encoding="utf-8")
@@ -89,22 +92,30 @@ class KnowledgeStoreTests(unittest.TestCase):
 
         thread = threading.Thread(target=refresher, daemon=True)
         thread.start()
-        try:
-            # 持续查询直到确认多轮刷新已完成：保证并发真正发生并发生交错，
-            # 而不是 40 次查询全部打在初始快照上"虚假通过"
-            deadline = time.time() + 3
-            while refresh_count["n"] < 3 and time.time() < deadline:
+
+        def run_queries() -> None:
+            for _ in range(20):
                 hits = store.search("alpha", dirs=[str(self.docs)])
                 for hit in hits:
                     self.assertIn("alpha", hit["text"].lower(),
                                   f"返回了不含查询词的片段（评分与文本不同代）：{hit}")
                     self.assertIn(hit["text"], known_texts)
+
+        try:
+            run_queries()          # 第一批查询无条件执行（不可能零查询通过）
+            queries_started.set()  # 屏障：刷新只在查询开始后才进行，保证交错
+            base = refresh_count["n"]
+            # 继续查询直到完成 ≥3 轮刷新：评分与文本的同代性在版本切换期间被反复检验
+            deadline = time.time() + 3
+            while refresh_count["n"] < base + 3 and time.time() < deadline:
+                run_queries()
                 time.sleep(0.001)
         finally:
             stop.set()
             thread.join(5)
         self.assertEqual(thread_errors, [])
-        self.assertGreaterEqual(refresh_count["n"], 3, "并发刷新未真正发生，测试无效")
+        self.assertGreaterEqual(refresh_count["n"] - base, 3,
+                                "查询期间未发生版本切换，交错断言无效")
 
     def test_old_version_index_is_discarded(self):
         # M7 回归：旧版本索引（可能含此后才被排除的敏感文件）整体废弃，不参与检索

@@ -299,30 +299,39 @@ class DomainIntegrationTests(unittest.TestCase):
         docs2.mkdir()
         (docs2 / "b.txt").write_text("second corpus text", encoding="utf-8")
         calls: list[list[str]] = []
+        gate = threading.Event()
         real_refresh = c.kb.refresh
 
         def flaky_refresh(dirs):
             calls.append(list(dirs))
             if len(calls) == 1:
+                gate.wait(2)  # 挂在抛错**前**：制造稳定的"A 在途"窗口
                 raise RuntimeError("simulated index failure")
             return real_refresh(dirs)
 
         c._cfg["domains"]["battery"]["kb_enabled"] = True
         c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs1)]
         with patch.object(c.kb, "refresh", flaky_refresh):
-            c._maybe_refresh_kb()  # A（将失败）
+            c._maybe_refresh_kb()  # A（挂起，将失败）
             deadline = time.time() + 2
             while not calls and time.time() < deadline:
                 QTest.qWait(10)
             c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs2)]
-            c._maybe_refresh_kb()  # A 还在"跑"（异常抛出前后都算 busy）→ pending B
+            c._maybe_refresh_kb()  # A 还在途 → B 进 pending
+            # 中间态断言（A 抛错前）：B 确实已排队、A 确实未提交签名——
+            # 否则"失败后补跑"可能只是失败后才启动的普通任务
+            self.assertEqual(calls, [[str(docs1)]])
+            self.assertEqual(c._kb_inflight, [str(docs1)])
+            self.assertEqual(c._kb_pending_dirs, [str(docs2)])
+            self.assertEqual(c._kb_dirs_signature, ())
+            gate.set()  # 放行 A → 抛错 → 交接 B
             deadline = time.time() + 3
             while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
         self.assertEqual(calls[0], [str(docs1)])
         self.assertEqual(calls[1], [str(docs2)], "失败后 pending 被丢弃，未补跑")
         self.assertFalse(c._kb_busy)
-        # 签名最终 = 成功轮 B；失败轮 A 未提交
+        # 签名最终 = 成功轮 B；失败轮 A 从未提交
         self.assertEqual(c._kb_dirs_signature, (str(docs2),))
         self.assertIn("second corpus", c.kb.search("second corpus")[0]["text"])
 
@@ -456,10 +465,10 @@ class SettingsFormRegressionTests(unittest.TestCase):
             QTest.qWait(5)
 
     def test_domain_combo_dedups_case_insensitive_aliases(self):
-        # m2 回归：大小写别名不进设置页——否则别名条目能借"清空/计数"动到
-        # 保留领域的翻译记忆
+        # m2 回归：大小写别名不进设置页，且保留者与运行时一致——
+        # 首个别名停用、第二个启用时，设置页必须显示"启用"的那个
         cfg = self._make_cfg()
-        cfg["domains"]["D1"] = {"name": "d1 的别名", "enabled": True, "kb_dirs": [],
+        cfg["domains"]["D1"] = {"name": "d1 的停用别名", "enabled": False, "kb_dirs": [],
                                 "kb_enabled": False}
         window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         try:
@@ -468,8 +477,8 @@ class SettingsFormRegressionTests(unittest.TestCase):
                      for i in range(window.domain_combo.count())]
             lowers = [d.lower() for d in datas]
             self.assertEqual(len(lowers), len(set(lowers)))  # 无大小写重复
-            self.assertIn("d1", datas)
-            self.assertNotIn("D1", datas)
+            self.assertIn("d1", datas)      # 保留者是启用的正主
+            self.assertNotIn("D1", datas)   # 停用别名不显示
         finally:
             window.hide()
             window.deleteLater()

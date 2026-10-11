@@ -4,10 +4,11 @@
 用法（App 持有一个 KnowledgeStore）：
     store = knowledge.KnowledgeStore(DATA_DIR / "kb_index")
     store.refresh(dirs)                      # 后台线程增量重建（按 mtime+size）
-    hits = store.search(query, dirs=[...])   # 本地毫秒级
+    hits = store.search(query, dirs=[...])   # 统计未就绪时返回空，不阻塞 GUI
 
-支持的格式：txt / md / csv / json 直读，pdf 用 pypdf，docx 用 python-docx。
-索引持久化在 kb_index/index.json；分块按段落聚合到约 500 字符，保留来源路径。
+支持的格式：txt / md / csv / json 直读（UTF-8 失败回退 GB18030），pdf 用
+pypdf，docx 用 python-docx。索引持久化在 kb_index/index.json；分块按段落
+聚合到约 500 字符，保留来源路径。
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import math
 import os
 import re
 import threading
+import zlib
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -25,9 +27,9 @@ log = logging.getLogger(__name__)
 SUPPORTED_EXTS = {".txt", ".md", ".markdown", ".csv", ".json", ".pdf", ".docx"}
 # 单文件大小上限（PDF 解析慢，避免误选巨型文件拖垮索引）
 MAX_FILE_BYTES = 20 * 1024 * 1024
-# 单页 PDF 内容流（未解码）上限：pypdf 提取一页文本也要解析完整内容流，
-# 单页超大（常见于恶意/损坏 PDF）会先撑爆内存，必须在提取前拦截
-MAX_PAGE_STREAM_BYTES = 20 * 1024 * 1024
+# 单页 PDF 内容流**解码后**的大小上限：pypdf 提取一页文本必须解析完整
+# 内容流，压缩流 20MB 可能解出上 GB（zip bomb 类），必须限制解码输出本身
+MAX_PAGE_DECODED_BYTES = 50 * 1024 * 1024
 # 单文件提取文本上限（磁盘大小限制不住 PDF 解压后的内容）
 MAX_TEXT_CHARS = 2_000_000
 # 全库片段总数上限（防超大语料撑爆内存与索引文件）
@@ -118,20 +120,42 @@ def parse_file(path: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
-def _page_stream_bytes(page) -> int | None:
-    """单页内容流（未解码）的字节数；取不到时返回 None（不限，交给输出预算兜底）。"""
+def _page_decoded_bytes(page, cap: int) -> int | None:
+    """页面内容流**解码后**的字节数。
+
+    - 超过 cap 时返回 cap + 1（zlib 带输出上限解压，不会真的解出超大数据）；
+    - 无法可靠判定（无未压缩数据 / 非 Flate 或未压缩滤镜 / 结构异常 /
+      流被截断）时返回 None——调用方必须跳过该页，不能"取不到就放行"。
+    """
     try:
         raw = page.raw_get("/Contents")
         obj = raw.get_object() if hasattr(raw, "get_object") else raw
         items = list(obj) if isinstance(obj, (list, tuple)) else [obj]
         total = 0
         for item in items:
-            data = getattr(item, "_data", None)
+            resolved = item.get_object() if hasattr(item, "get_object") else item
+            data = getattr(resolved, "_data", None)
             if data is None:
                 return None
-            total += len(data)
-        return total or None
-    except Exception:  # noqa: BLE001 — 结构异常的页面不做预检
+            filt = resolved.get("/Filter")
+            name = str(filt) if filt is not None else ""
+            if not name:
+                total += len(data)  # 未压缩：存储字节即解码后大小
+            elif name == "/FlateDecode":
+                remaining = cap - total
+                if remaining <= 0:
+                    return cap + 1
+                decoder = zlib.decompressobj()
+                out = decoder.decompress(data, remaining + 1)  # 输出封顶，防炸弹
+                if len(out) > remaining or decoder.unconsumed_tail:
+                    return cap + 1  # 解码输出超过预算
+                if not decoder.eof:
+                    return None  # 流被截断/多成员，无法安全判定
+                total += len(out)
+            else:
+                return None  # 其他滤镜链无法可靠估计解码后规模
+        return total
+    except Exception:  # noqa: BLE001 — 结构异常的页面按"无法判定"处理
         return None
 
 
@@ -142,9 +166,13 @@ def _parse_pdf(path: Path, max_chars: int) -> str:
     pages = []
     total = 0
     for page in reader.pages:
-        stream_bytes = _page_stream_bytes(page)
-        if stream_bytes is not None and stream_bytes > MAX_PAGE_STREAM_BYTES:
-            log.warning("PDF 单页内容流过大（%s 字节），跳过该页：%s", stream_bytes, path)
+        decoded = _page_decoded_bytes(page, MAX_PAGE_DECODED_BYTES)
+        if decoded is None:
+            log.warning("PDF 页面内容流无法可靠估计解码规模，跳过该页：%s", path)
+            continue
+        if decoded > MAX_PAGE_DECODED_BYTES:
+            log.warning("PDF 单页解码内容超过 %s 字节，跳过该页：%s",
+                        MAX_PAGE_DECODED_BYTES, path)
             continue
         try:
             pages.append(page.extract_text() or "")
@@ -232,8 +260,8 @@ class KnowledgeStore:
         self._exclude_rules = [(_norm_file(p), _norm_dir(str(p)))
                                for p in [*_default_excludes(index_dir), *(exclude or [])]]
         self._load()
-        if self._chunks:  # 磁盘索引已有内容：后台预热统计，GUI 首次检索不卡顿
-            threading.Thread(target=self._preheat, name="kb-preheat", daemon=True).start()
+        if self._chunks:  # 磁盘索引已有内容：走统一调度入口预热统计（占用 _building）
+            self._stats_ready_or_schedule()
 
     def _preheat(self) -> None:
         try:
