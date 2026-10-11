@@ -2,6 +2,8 @@
 """领域适配集成测试：配置种入、_compose_system 组装链路、切换与持久化。"""
 
 import tempfile
+import threading
+import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -181,7 +183,8 @@ class DomainIntegrationTests(unittest.TestCase):
         self.assertEqual(c._cfg["active_domain"], "battery")
 
     def test_explain_page_has_no_tm_button_and_save_is_rejected(self):
-        # M5 回归：解释不是译文，不能进翻译记忆
+        # M5 回归：解释不是译文，不能进翻译记忆——按钮不出现，且即使有解释
+        # 内容、保存入口被误触发也必须拒绝（空内容提前返回不算证据）
         from PySide6.QtWidgets import QPushButton
         c = self.controller
         self.open_selection()
@@ -189,15 +192,28 @@ class DomainIntegrationTests(unittest.TestCase):
         explain_buttons = [b.text() for b in c.popup.tabs.widget(1).findChildren(QPushButton)]
         self.assertIn("存为记忆", translate_buttons)
         self.assertNotIn("存为记忆", explain_buttons)
-        # 入口二次校验：即使收到 explain 的保存信号也不写入
-        before = c.tmstore.count("battery")
         c.set_domain("battery")
-        c.on_tm_save("explain")
-        self.assertEqual(c.tmstore.count("battery"), before)
+        c.popup.append_chunk("explain", "这是一段已经生成的解释内容。")
+        c.popup.mark_done("explain")
+        constructed = []
+
+        class ShouldNotConstruct:
+            def __init__(self, *args, **kwargs):
+                constructed.append(args)
+
+            def exec(self):
+                return self.Accepted
+
+            Accepted = 1
+
+        with patch.object(huayi, "TmEditDialog", ShouldNotConstruct):
+            c.on_tm_save("explain")
+        self.assertEqual(constructed, [])
+        self.assertEqual(c.tmstore.count("battery"), 0)
 
     def test_tm_save_snapshots_source_against_dialog_reentry(self):
-        # M6 回归：exec() 的嵌套事件循环期间可能收到新取词结果，
-        # 保存进记忆的原文必须是打开对话框那一刻的快照
+        # M6 回归：exec() 的嵌套事件循环期间可能收到新取词结果或学科切换，
+        # 保存进记忆的原文与领域必须是打开对话框那一刻的快照
         c = self.controller
         c.set_domain("battery")
         self.open_selection("The SEI forms here.")
@@ -214,8 +230,9 @@ class DomainIntegrationTests(unittest.TestCase):
                 self._translation = translation
 
             def exec(self):
-                # 模拟对话框打开期间，后台取词回调把 _sel 换成了新文本
+                # 模拟对话框打开期间：新取词到达 + 用户切换学科到通用
                 c._sel = Selection(text="A NEW selection arrived mid-dialog.")
+                c._cfg["active_domain"] = ""
                 return self.Accepted
 
             def translation(self):
@@ -223,26 +240,67 @@ class DomainIntegrationTests(unittest.TestCase):
 
         with patch.object(huayi, "TmEditDialog", FakeDialog):
             c.on_tm_save("translate")
-        entries = c.tmstore._load(c.tmstore.path_for("battery"))[0]
+        entries = c.tmstore._load(c.tmstore.path_for("battery"))[0]  # 领域快照 = battery
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["src"], "The SEI forms here.")  # 快照，不是新取词
         self.assertEqual(entries[0]["tgt"], "SEI 在此形成。")
+        # 通用模式的记忆不受影响
+        self.assertEqual(c.tmstore._load(c.tmstore.path_for(""))[0], [])
 
-    def test_kb_dir_change_while_busy_is_not_lost(self):
-        # M3 回归：索引忙时到来的目录变更必须被记录补跑，而不是被签名吞掉
+    def test_kb_pending_dirs_are_actually_processed(self):
+        # M3 回归：索引忙时到来的目录变更，必须在工作循环结束后被真实补跑
         c = self.controller
-        c._kb_busy = True
-        try:
-            c._maybe_refresh_kb()  # 启动时触发一次（busy → 进 pending）
-            c._cfg["domains"]["battery"]["kb_enabled"] = True
-            c._cfg["domains"]["battery"]["kb_dirs"] = [str(self.base / "docs")]
-            c._maybe_refresh_kb()  # 目录变化 → 仍 busy → 记录 pending
-            with c._kb_pending_lock:
-                self.assertEqual(c._kb_pending_dirs, [str(self.base / "docs")])
-        finally:
-            c._kb_busy = False
-            with c._kb_pending_lock:
-                c._kb_pending_dirs = None
+        docs1 = self.base / "docs1"
+        docs1.mkdir()
+        (docs1 / "a.txt").write_text("first corpus text", encoding="utf-8")
+        docs2 = self.base / "docs2"
+        docs2.mkdir()
+        (docs2 / "b.txt").write_text("second corpus text", encoding="utf-8")
+        calls: list[list[str]] = []
+        gate = threading.Event()
+        real_refresh = c.kb.refresh
+
+        def slow_refresh(dirs):
+            calls.append(list(dirs))
+            result = real_refresh(dirs)
+            if len(calls) == 1:
+                gate.wait(2)  # 第一轮挂起，制造 busy 窗口
+            return result
+
+        c._cfg["domains"]["battery"]["kb_enabled"] = True
+        c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs1)]
+        with patch.object(c.kb, "refresh", slow_refresh):
+            c._maybe_refresh_kb()  # 第 1 轮（阻塞在 gate）
+            deadline = time.time() + 2
+            while not calls and time.time() < deadline:
+                QTest.qWait(10)
+            self.assertEqual(len(calls), 1)
+            c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs2)]
+            c._maybe_refresh_kb()  # busy → 目录暂存为 pending
+            gate.set()             # 放行第 1 轮
+            # 等到第 2 轮开始且工作循环彻底退出（busy=False、pending 清空）
+            deadline = time.time() + 3
+            while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
+                QTest.qWait(10)
+        # pending 真实补跑（而不只是入队）
+        self.assertEqual(len(calls), 2, f"pending 未被补跑：{calls}")
+        self.assertEqual(calls[1], [str(docs2)])
+        self.assertFalse(c._kb_busy)
+        self.assertIsNone(c._kb_pending_dirs)
+        self.assertIn("second corpus", c.kb.search("second corpus")[0]["text"])
+
+    def test_kb_rebuild_none_uses_saved_config_and_empty_list_clears(self):
+        # 复核新问题 1 的语义修复：None = 用已保存配置；[] = 用户刚清空全部目录
+        c = self.controller
+        c._cfg["domains"]["battery"]["kb_enabled"] = True
+        c._cfg["domains"]["battery"]["kb_dirs"] = ["D:/some/dir"]
+        captured: list = []
+        with patch.object(c, "_start_kb_worker",
+                          lambda dirs, signature=None: captured.append((list(dirs), signature))):
+            c.on_kb_rebuild(None)
+            c.on_kb_rebuild([])
+        self.assertEqual(captured[0], (["D:/some/dir"], ("D:/some/dir",)))
+        self.assertEqual(captured[1], ([], ()))  # 空列表不得回退到已保存配置
 
 
 class SettingsFormRegressionTests(unittest.TestCase):
@@ -284,6 +342,32 @@ class SettingsFormRegressionTests(unittest.TestCase):
             self.assertEqual(d2["kb_dirs"], [])
             self.assertFalse(d2["enabled"])
             self.assertTrue(d2["kb_for_translate"])
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
+    def test_rebuild_requests_union_of_all_enabled_domains(self):
+        # 复核新问题 1：重建索引用全部启用领域的目录并集（共享索引），
+        # 当前领域用表单实时值——不能只传当前领域把其他领域挤掉
+        cfg = self._make_cfg()
+        cfg["domains"]["d2"].update({"kb_dirs": ["D:/kb/two"], "kb_enabled": True,
+                                     "enabled": True})
+        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        captured: list = []
+        window.rebuild_requested.connect(lambda dirs: captured.append(list(dirs)))
+        try:
+            window.reload()
+            combo = window.domain_combo
+            combo.setCurrentIndex(combo.findData("d1"))
+            window.kb_dirs.clear()          # 用户在表单里改了 d1 的目录（未保存）
+            window.kb_dirs.addItem("D:/kb/edited")
+            window._rebuild_kb()
+            self.assertEqual(captured, [["D:/kb/edited", "D:/kb/two"]])
+            # 当前领域在表单里被停用后，其目录退出并集
+            window.domain_enabled.setChecked(False)
+            window._rebuild_kb()
+            self.assertEqual(captured[-1], ["D:/kb/two"])
         finally:
             window.hide()
             window.deleteLater()

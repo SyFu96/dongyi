@@ -54,44 +54,87 @@ class KnowledgeStoreTests(unittest.TestCase):
         return path
 
     def test_search_consistent_under_concurrent_refresh(self):
-        # M2 回归：refresh 与 search 并发时，返回的文本必须与评分来自同一代索引
-        # （不会拿新词频评旧文本、也不会越界），且任何命中都是真实存在过的版本
+        # M2 回归：refresh 与 search 并发时，评分与返回文本必须来自同一代索引。
+        # 语料的词项和块数都随代变化：genA 含 alpha（1 块），genB 不含（2 块）。
+        # 若出现"新统计+旧文本"的错配，会返回不含查询词 alpha 的片段 → 断言抓包。
         import threading
 
-        known_versions: set[str] = set()
-        for i in range(3):
-            text = f"shared topic{i} content " * 4
-            self._write(f"f{i}.txt", text)
-            known_versions.add(text.strip())  # 索引存的是 strip 后的分块
+        known_texts: set[str] = set()
+        gen_a = "shared alpha content " * 20                      # 1 块，含 alpha
+        gen_b = "\n\n".join(["shared beta content " * 30,
+                             "shared gamma content " * 30])       # 2 块，不含 alpha
+        known_texts.add(gen_a.strip())
+        known_texts.add(gen_b.strip())
+        self._write("f0.txt", gen_a)
+        self._write("f1.txt", "alpha alpha alpha")
+        known_texts.add(("alpha alpha alpha").strip())
         store = knowledge.KnowledgeStore(self.index_dir)
         store.refresh([str(self.docs)])
 
+        thread_errors: list[Exception] = []
         stop = threading.Event()
 
         def refresher() -> None:
             n = 0
-            while not stop.is_set():
-                text = f"shared topicX{n} content " * 4
-                try:
+            try:
+                while not stop.is_set():
+                    text = gen_b if n % 2 == 0 else gen_a
                     (self.docs / "f0.txt").write_text(text, encoding="utf-8")
-                    known_versions.add(text.strip())
                     store.refresh([str(self.docs)])
-                except Exception:  # noqa: BLE001 — 刷新线程的错误由断言外观察
-                    pass
-                n += 1
+                    n += 1
+            except Exception as e:  # noqa: BLE001 — 传回主线程断言
+                thread_errors.append(e)
 
         thread = threading.Thread(target=refresher, daemon=True)
         thread.start()
         try:
             for _ in range(40):
-                hits = store.search("shared content", dirs=[str(self.docs)])
+                hits = store.search("alpha", dirs=[str(self.docs)])
                 for hit in hits:
-                    self.assertTrue(hit["text"])
-                    self.assertTrue(hit["path"].endswith((".txt",)))
-                    self.assertIn(hit["text"], known_versions)  # 不会拼出从未存在的文本
+                    self.assertIn("alpha", hit["text"].lower(),
+                                  f"返回了不含查询词的片段（评分与文本不同代）：{hit}")
+                    self.assertIn(hit["text"], known_texts)
         finally:
             stop.set()
             thread.join(5)
+        self.assertEqual(thread_errors, [])
+
+    def test_old_version_index_is_discarded(self):
+        # M7 回归：旧版本索引（可能含此后才被排除的敏感文件）整体废弃，不参与检索
+        import json
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        (self.index_dir / "index.json").write_text(json.dumps({
+            "version": knowledge.KnowledgeStore.VERSION - 1,
+            "files": {"C:/fake/config.json": {"mtime": 0, "size": 0, "chunks": 1}},
+            "chunks": [{"path": "C:/fake/config.json",
+                        "text": "cloud api_key FAKE-SECRET-KEY battery"}],
+        }, ensure_ascii=False), encoding="utf-8")
+        store = knowledge.KnowledgeStore(self.index_dir)
+        self.assertEqual(store.search("FAKE-SECRET-KEY"), [])  # 刷新前也搜不到
+        self.assertEqual(store.stats()["files"], 0)
+
+    def test_chunk_total_cap_marks_incomplete_and_refills(self):
+        # M10 回归：总额度对缓存复用同样生效；被截断的文件标记 complete=False，
+        # 容量释放后（其他文件删除）下次刷新重新解析补齐
+        from unittest.mock import patch
+        big_a = "\n\n".join(["甲" * 300, "乙" * 300])  # 2 块
+        big_b = "\n\n".join(["丙" * 300, "丁" * 300])  # 2 块
+        self._write("a.txt", big_a)
+        self._write("b.txt", big_b)
+        with patch.object(knowledge, "MAX_TOTAL_CHUNKS", 3):
+            store = knowledge.KnowledgeStore(self.index_dir)
+            stats = store.refresh([str(self.docs)])
+            self.assertEqual(stats["chunks"], 3)  # a 完整 2 块 + b 被截到 1 块
+            self.assertFalse(store._files[str(self.docs / "b.txt")]["complete"])
+            # 无容量变化：b 重解析仍被截断
+            store.refresh([str(self.docs)])
+            self.assertFalse(store._files[str(self.docs / "b.txt")]["complete"])
+            (self.docs / "a.txt").unlink()  # 释放容量
+            store.refresh([str(self.docs)])
+            record = store._files[str(self.docs / "b.txt")]
+            self.assertTrue(record["complete"])
+            self.assertEqual(record["chunks"], 2)
+            self.assertIn("丁", store.search("丁丁", dirs=[str(self.docs)])[0]["text"])
 
     def test_avgdl_counts_all_tokens_not_unique(self):
         # M1 回归：平均块长必须与评分的块长同口径（全部 token 数），

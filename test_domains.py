@@ -130,6 +130,19 @@ class DomainConfigTests(unittest.TestCase):
         self.assertFalse(domains.valid_id("../escape"))
         self.assertTrue(domains.valid_id("tcm_2026"))
 
+    def test_enabled_domains_dedup_case_insensitive(self):
+        # 翻译记忆按小写落盘：Battery/battery 共存会共用同一份记忆、互相清空，
+        # 配置层必须去重只保留一个
+        cfg = {"domains": {
+            "Battery": {"name": "大写", "enabled": True},
+            "battery": {"name": "小写", "enabled": True},
+            "other": {"name": "其他", "enabled": True},
+        }}
+        battery_ids = [did for did, _ in domains.enabled_domains(cfg)
+                       if did.lower() == "battery"]
+        self.assertEqual(len(battery_ids), 1)
+        self.assertIn("other", [did for did, _ in domains.enabled_domains(cfg)])
+
     def test_resolve_active_falls_back_to_general(self):
         cfg = {"domains": {"battery": {"name": "电池", "enabled": True}},
                "active_domain": "missing"}

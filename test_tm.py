@@ -29,10 +29,29 @@ class TmStoreTests(unittest.TestCase):
         self.assertEqual(self.store.path_for("battery").name, "dom_battery.jsonl")
         self.assertEqual(self.store.path_for("").name, "general.jsonl")
         self.assertEqual(self.store.path_for("../evil").name, "general.jsonl")
-        # id "general" 不得占用通用模式的命名空间；大小写不同不落同一文件
+        # id "general" 不得占用通用模式的命名空间。
+        # （Battery/battery 大小写碰撞由 domains.enabled_domains 在配置层去重防止）
         self.assertEqual(self.store.path_for("general").name, "dom_general.jsonl")
-        self.assertEqual(self.store.path_for("Battery").name,
-                         self.store.path_for("battery").name)
+
+    def test_legacy_file_is_migrated_on_access(self):
+        # 旧版文件名 tm/<id>.jsonl：首次访问时整体迁移到 dom_<id>.jsonl
+        legacy = self.store.path_for("battery").parent / "battery.jsonl"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"src": "old", "tgt": "旧句对"}\n', encoding="utf-8")
+        self.assertEqual(self.store.count("battery"), 1)
+        self.assertFalse(legacy.exists())  # 已改名迁移
+        self.assertTrue(self.store.path_for("battery").exists())
+        text = self.store.example_context("battery", "old sentence")
+        self.assertIn("旧句对", text)
+
+    def test_new_file_wins_when_both_exist(self):
+        new_path = self.store.path_for("battery")
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text('{"src": "new", "tgt": "新文件"}\n', encoding="utf-8")
+        legacy = new_path.parent / "battery.jsonl"
+        legacy.write_text('{"src": "old", "tgt": "旧文件"}\n', encoding="utf-8")
+        self.assertEqual(self.store.count("battery"), 1)  # 以新文件为准
+        self.assertIn("新文件", self.store.example_context("battery", "new"))
 
     def test_corrupted_records_and_encoding_do_not_break_reads(self):
         path = self.store.path_for("battery")

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -61,7 +62,27 @@ class TmStore:
             safe = "general"
         return self._dir / f"{safe}.jsonl"
 
+    def _migrate_legacy(self, path: Path) -> None:
+        """旧版（v0.1 领域适配首发）文件名是 tm/<id>.jsonl，现改为 dom_<id小写>.jsonl。
+
+        目标文件不存在而旧文件存在时整体改名迁移；两者并存时以新文件为准
+        （旧文件保留在磁盘上，不再参与读写）。
+        """
+        name = path.name
+        if not name.startswith("dom_"):
+            return
+        legacy = self._dir / name[len("dom_"):]
+        if not legacy.is_file() or path.exists():
+            return
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+            os.replace(legacy, path)
+            log.info("翻译记忆已迁移：%s → %s", legacy.name, name)
+        except OSError:
+            log.warning("翻译记忆迁移失败：%s", legacy, exc_info=True)
+
     def _load(self, path: Path) -> tuple[list[dict], list[set]]:
+        self._migrate_legacy(path)
         try:
             stat = path.stat()
             stamp = (stat.st_mtime, stat.st_size)
@@ -135,9 +156,11 @@ class TmStore:
         if not text:
             return ""
         entries, token_sets = self._load(self.path_for(domain_id))
+        # 先切片再配对：只处理最近条目，不为整库构造中间列表
+        entries = entries[-MAX_SCAN_ENTRIES:]
+        token_sets = token_sets[-MAX_SCAN_ENTRIES:]
         query_tokens = set(tokenize(text))  # 查询只分词一次
-        recent = list(zip(token_sets, entries))[-MAX_SCAN_ENTRIES:]  # 只看最近条目
-        candidates = [(tokens, entry) for tokens, entry in recent
+        candidates = [(tokens, entry) for tokens, entry in zip(token_sets, entries)
                       if len(entry["src"]) <= MAX_PAIR_CHARS
                       and len(entry["tgt"]) <= MAX_PAIR_CHARS]
         if not candidates:

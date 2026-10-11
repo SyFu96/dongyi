@@ -62,11 +62,22 @@ def valid_id(domain_id: str) -> bool:
 
 
 def enabled_domains(cfg: dict) -> list[tuple[str, dict]]:
-    """[(id, 配置)]，只保留 id 合法且 enabled 的领域，按 id 排序保证菜单稳定。"""
+    """[(id, 配置)]，只保留 id 合法且 enabled 的领域，按 id 排序保证菜单稳定。
+
+    大小写折叠后重复的 id 只保留一个（翻译记忆等按小写落盘，
+    Battery/battery 共存会共用同一份记忆、互相清空）。
+    """
     out = []
+    seen: set[str] = set()
     for did, dom in (cfg.get("domains") or {}).items():
-        if valid_id(did) and isinstance(dom, dict) and dom.get("enabled", True):
-            out.append((did, dom))
+        if not valid_id(did) or not isinstance(dom, dict) or not dom.get("enabled", True):
+            continue
+        key = did.lower()
+        if key in seen:
+            log.warning("领域 id %s 与已有领域仅大小写不同，已忽略该领域配置", did)
+            continue
+        seen.add(key)
+        out.append((did, dom))
     return sorted(out, key=lambda pair: pair[0])
 
 
@@ -126,8 +137,8 @@ def load_glossary(path: Path) -> list[tuple[str, str, str]]:
                 if not translation:
                     continue
                 note = (row[2] or "").strip() if len(row) > 2 else ""
-                # 超长字段多为误粘贴，截断保护 system prompt
-                term, translation, note = (first[:MAX_FIELD_CHARS],
+                # 原文完整保留（截断会改变匹配对象）；译文/备注截断保护 system prompt
+                term, translation, note = (first,
                                            translation[:MAX_FIELD_CHARS],
                                            note[:MAX_FIELD_CHARS])
                 # 同一原文多次出现时，后面的行生效（便于在表尾覆盖修正）

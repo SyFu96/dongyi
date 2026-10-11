@@ -496,8 +496,23 @@ class SettingsWindow(QWidget):
 
     def _rebuild_kb(self) -> None:
         self._sync_form_to_work()
-        # 带上工作副本里的目录（未保存也生效：索引只是缓存），否则 App 会读到旧配置
-        dirs = [self.kb_dirs.item(i).text() for i in range(self.kb_dirs.count())]
+        # 索引是所有领域共享的：重建必须用全部启用领域的目录并集（当前领域
+        # 取表单实时值，未保存也生效），否则会把其他领域的资料从索引里挤掉
+        did = self._current_domain_id()
+        dirs: list[str] = []
+        for dom_id, dom in self._domains.items():
+            if not domains.valid_id(dom_id) or not isinstance(dom, dict):
+                continue
+            if dom_id == did:
+                if not self.domain_enabled.isChecked() or not self.chk_kb.isChecked():
+                    continue
+                dirs.extend(self.kb_dirs.item(i).text()
+                            for i in range(self.kb_dirs.count()))
+            else:
+                if not dom.get("enabled", True) or not dom.get("kb_enabled"):
+                    continue
+                dirs.extend(dom.get("kb_dirs") or [])
+        dirs = list(dict.fromkeys(d for d in dirs if d))
         self.rebuild_requested.emit(dirs)
 
     def set_kb_status(self, text: str) -> None:

@@ -101,7 +101,7 @@ def parse_file(path: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
     """
     ext = path.suffix.lower()
     if ext == ".pdf":
-        text = _parse_pdf(path)
+        text = _parse_pdf(path, max_chars)
     elif ext == ".docx":
         text = _parse_docx(path)
     else:
@@ -115,16 +115,20 @@ def parse_file(path: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
-def _parse_pdf(path: Path) -> str:
+def _parse_pdf(path: Path, max_chars: int) -> str:
     from pypdf import PdfReader  # 延迟导入：未用到 PDF 时不拖慢启动
 
     reader = PdfReader(str(path))
     pages = []
+    total = 0
     for page in reader.pages:
         try:
             pages.append(page.extract_text() or "")
         except Exception:  # noqa: BLE001 — 单页损坏不影响其余页
             continue
+        total += len(pages[-1])
+        if total >= max_chars:
+            break  # 逐页预算：不在超长 PDF 上无限消耗内存与时间
     return "\n\n".join(pages)
 
 
@@ -140,6 +144,26 @@ def _parse_docx(path: Path) -> str:
 
 
 # ---------------------------------------------------------------- 索引与检索
+
+
+def _build_stats(chunks: list[dict]) -> tuple[list[dict[str, int]], dict[str, int], float]:
+    """对一批 chunks 建检索统计：(每块词频, 词→块数, 平均块长)。
+
+    平均块长与评分的块长同口径：全部 token 数（不是不同词的个数）。
+    """
+    counts: list[dict[str, int]] = []
+    df: dict[str, int] = {}
+    total_tokens = 0
+    for chunk in chunks:
+        tf: dict[str, int] = {}
+        for token in tokenize(chunk["text"]):
+            tf[token] = tf.get(token, 0) + 1
+        counts.append(tf)
+        total_tokens += sum(tf.values())
+        for term in tf:
+            df[term] = df.get(term, 0) + 1
+    avgdl = total_tokens / len(chunks) if chunks else 1.0
+    return counts, df, avgdl
 
 
 def _norm_dir(d: str) -> str:
@@ -164,7 +188,7 @@ class KnowledgeStore:
     防止用户把项目目录设为知识库后密钥被索引并外发）。".git" 目录始终排除。
     """
 
-    VERSION = 1
+    VERSION = 2  # v2：文件记录带 complete 字段；旧版索引直接废弃重建（顺带清掉历史敏感残留）
 
     def __init__(self, index_dir: Path, exclude: "list[str | Path] | None" = None) -> None:
         self._dir = index_dir
@@ -183,6 +207,14 @@ class KnowledgeStore:
         self._exclude_rules = [(_norm_file(p), _norm_dir(str(p)))
                                for p in [*_default_excludes(index_dir), *(exclude or [])]]
         self._load()
+        if self._chunks:  # 磁盘索引已有内容：后台预热统计，GUI 首次检索不卡顿
+            threading.Thread(target=self._preheat, name="kb-preheat", daemon=True).start()
+
+    def _preheat(self) -> None:
+        try:
+            self._ensure_stats()
+        except Exception:  # noqa: BLE001 — 预热失败留给首次检索兜底
+            log.debug("知识库统计预热失败", exc_info=True)
 
     def _excluded(self, path: Path) -> bool:
         normalized = _norm_file(path)
@@ -217,7 +249,13 @@ class KnowledgeStore:
     # —— 重建
 
     def refresh(self, dirs: list[str]) -> dict:
-        """增量重建并返回统计 {"files": n, "chunks": n, "parsed": n, "errors": n}。"""
+        """增量重建并返回统计 {"files": n, "chunks": n, "parsed": n, "errors": n}。
+
+        片段总额度对"缓存复用"与"新解析"统一生效：被额度截断的文件记录
+        complete=False，之后容量释放时（其他文件删除）会重新解析补齐。
+        统计（分词/df/avgdl）在本方法内随新索引一次性原子换入——发布即可检索，
+        GUI 线程永远不会撞上"统计未建好"的窗口。
+        """
         wanted: dict[str, tuple[float, int]] = {}
         for d in dirs:
             root = Path(d)
@@ -246,38 +284,46 @@ class KnowledgeStore:
         indexed: dict[str, dict] = {}
         hit_total_cap = False
         for path_str, (mtime, size) in sorted(wanted.items()):
-            if len(new_chunks) >= MAX_TOTAL_CHUNKS:
+            room = MAX_TOTAL_CHUNKS - len(new_chunks)
+            if room <= 0:
                 hit_total_cap = True
                 break
-            old = self._files.get(path_str)
-            kept = None
-            if old and old.get("mtime") == mtime and old.get("size") == size:
-                kept = old_by_path.get(path_str)
-            if kept is not None:
+            record = self._files.get(path_str)
+            reusable = None
+            if (record and record.get("complete", False)
+                    and record.get("mtime") == mtime and record.get("size") == size):
+                reusable = old_by_path.get(path_str)
+            if reusable is not None:
+                kept = reusable[:room]  # 缓存复用同样受额度约束
                 new_chunks.extend(kept)
-                indexed[path_str] = {"mtime": mtime, "size": size, "chunks": len(kept)}
+                indexed[path_str] = {"mtime": mtime, "size": size, "chunks": len(kept),
+                                     "complete": len(kept) == len(reusable)}
                 continue
             try:
-                pieces = chunk_text(parse_file(Path(path_str)))
+                pieces = chunk_text(parse_file(Path(path_str), MAX_TEXT_CHARS))
             except Exception as e:  # noqa: BLE001 — 单文件失败跳过（下次刷新重试）
                 log.warning("知识库解析失败 %s：%s", path_str, e)
                 errors += 1
                 continue
             parsed += 1
-            room = MAX_TOTAL_CHUNKS - len(new_chunks)
-            new_chunks.extend({"path": path_str, "text": piece} for piece in pieces[:room])
-            indexed[path_str] = {"mtime": mtime, "size": size, "chunks": min(len(pieces), room)}
+            take = pieces[:room]
+            new_chunks.extend({"path": path_str, "text": piece} for piece in take)
+            indexed[path_str] = {"mtime": mtime, "size": size, "chunks": len(take),
+                                 "complete": len(pieces) <= room}
         if hit_total_cap:
-            log.warning("知识库片段总数超过 %s，其余文件本次未索引", MAX_TOTAL_CHUNKS)
+            log.warning("知识库片段总数达到上限 %s，其余文件未索引", MAX_TOTAL_CHUNKS)
 
+        counts, df, avgdl = _build_stats(new_chunks)
         with self._lock:
             self._files = indexed
             self._chunks = new_chunks
+            self._stats_chunks = new_chunks
+            self._counts, self._df, self._avgdl = counts, df, avgdl
             self._index_gen += 1
+            self._built_gen = self._index_gen  # 统计与索引同代发布
             stats = {"files": len(indexed), "chunks": len(new_chunks),
                      "parsed": parsed, "errors": errors}
         self._save()
-        self._ensure_stats()  # 后台线程里预热分词统计，GUI 首次检索不卡顿
         return stats
 
     # —— 检索
@@ -285,26 +331,15 @@ class KnowledgeStore:
     def _ensure_stats(self) -> tuple[list[dict], list[dict[str, int]], dict[str, int], float]:
         """返回同一代索引的 (chunks, 每块词频, 词→块数, 平均块长)。
 
-        与 search 使用同一份快照，保证评分与返回文本来自同一版本；
-        chunks 未变时直接用缓存。平均块长与评分的块长同口径（全部 token 数）。
+        refresh 发布时已带统计；此函数只兜底磁盘加载后尚未预热的情况。
+        平均块长与评分的块长同口径（全部 token 数）。
         """
         with self._lock:
             if self._built_gen == self._index_gen:
                 return self._stats_chunks, self._counts, self._df, self._avgdl
             chunks = list(self._chunks)  # 浅拷贝；元素 dict 从不被原地修改
             gen = self._index_gen
-        counts: list[dict[str, int]] = []
-        df: dict[str, int] = {}
-        total_tokens = 0
-        for chunk in chunks:
-            tf: dict[str, int] = {}
-            for token in tokenize(chunk["text"]):
-                tf[token] = tf.get(token, 0) + 1
-            counts.append(tf)
-            total_tokens += sum(tf.values())  # 与评分的 dl 同口径：全部 token 数
-            for term in tf:
-                df[term] = df.get(term, 0) + 1
-        avgdl = total_tokens / len(chunks) if chunks else 1.0
+        counts, df, avgdl = _build_stats(chunks)
         with self._lock:
             if self._index_gen == gen:  # 构建期间未被并发 refresh 覆盖
                 self._stats_chunks, self._counts = chunks, counts

@@ -343,7 +343,7 @@ class App(QObject):
         self.tmstore = tm.TmStore(DATA_DIR / "tm")
         self._kb_busy = False
         self._kb_pending_dirs: list[str] | None = None  # 索引忙时暂存的最新目录集合
-        self._kb_pending_lock = threading.Lock()
+        self._kb_lock = threading.Lock()
         self._kb_dirs_signature: tuple[str, ...] = ()
         self.popup = PopupWindow(cfg)
         self.popup.input_requested.connect(self.on_input_translate)
@@ -763,71 +763,65 @@ class App(QObject):
         signature = tuple(dirs)
         if not force and signature == self._kb_dirs_signature:
             return
-        self._kb_dirs_signature = signature
-        if not dirs and not force:
-            return
-        self._refresh_kb_async(dirs)
+        self._start_kb_worker(dirs, signature)
 
-    def _refresh_kb_async(self, dirs: list[str]) -> None:
-        """后台刷新索引；已有任务在跑时把最新目录集合暂存，任务结束后补跑，
-        保证索引忙期间发生的目录变更不会丢失。"""
-        if self._kb_busy:
-            with self._kb_pending_lock:
-                self._kb_pending_dirs = dirs
-            return
-        self._kb_busy = True
+    def _start_kb_worker(self, dirs: list[str], signature: tuple[str, ...] | None = None) -> None:
+        """启动（或并入）一次索引刷新：已有任务在跑时把目录暂存为待办。"""
+        with self._kb_lock:
+            if self._kb_busy:
+                self._kb_pending_dirs = list(dirs)
+                return
+            self._kb_busy = True
+        threading.Thread(target=self._kb_worker_run, args=(list(dirs), signature),
+                         name="kb-refresh", daemon=True).start()
 
-        def run() -> None:
+    def _kb_worker_run(self, dirs: list[str], signature: tuple[str, ...] | None) -> None:
+        """索引工作循环：串行消费 pending，交接在同一把锁内完成（无窗口）。
+
+        - 签名只在刷新成功后提交：失败不阻塞下次相同配置的重试；
+        - busy 的清除与 pending 的读取在同一锁持有期内：期间任何新请求
+          都会先看到 busy=True 并写入 pending，随后被本循环取走，不会丢失。
+        """
+        current, current_sig = dirs, signature
+        while current is not None:
             try:
-                current = dirs
-                while current is not None:
-                    try:
-                        stats = self.kb.refresh(current)
-                        log.info("知识库索引完成：%s", stats)
-                    except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
-                        log.exception("知识库索引刷新失败")
-                        break
-                    # 取走补跑意图（GUI 线程可能在上一轮期间写入了新目录）
-                    with self._kb_pending_lock:
-                        current, self._kb_pending_dirs = self._kb_pending_dirs, None
-            finally:
-                self._kb_busy = False
-
-        threading.Thread(target=run, name="kb-refresh", daemon=True).start()
+                stats = self.kb.refresh(current)
+            except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
+                log.exception("知识库索引刷新失败")
+                with self._kb_lock:
+                    self._kb_pending_dirs = None
+                    self._kb_busy = False
+                return
+            if current_sig is not None:
+                with self._kb_lock:
+                    self._kb_dirs_signature = current_sig
+            log.info("知识库索引完成：%s", stats)
+            self.kb_bridge.status.emit(
+                f"索引完成：{stats['files']} 个文件 · {stats['chunks']} 个片段"
+                f"（新解析 {stats['parsed']}，失败 {stats['errors']}）")
+            with self._kb_lock:
+                current = self._kb_pending_dirs
+                self._kb_pending_dirs = None
+                current_sig = tuple(current) if current is not None else None
+                if current is None:
+                    self._kb_busy = False
 
     def on_kb_rebuild(self, dirs: list | None = None) -> None:
         """设置页「重建索引」：后台重建并回写状态。
 
-        dirs 来自设置页的工作副本（可能尚未保存），直接用它刷新——索引只是
+        - dirs=None：用已保存配置计算目录；
+        - dirs=[]：用户刚清空全部目录（显式重建为空索引）——不能回退到旧配置。
+        目录集合来自设置页工作副本（可能尚未保存），直接用它刷新——索引只是
         缓存，提前索引未保存目录没有副作用。
         """
-        if self._kb_busy:
-            with self._kb_pending_lock:
-                self._kb_pending_dirs = list(dirs or [])
-            self.settings.set_kb_status("索引进行中，新请求已排队…")
-            return
-        dirs = list(dirs) if dirs else self._kb_dirs_all()
-        if not dirs:
-            self.settings.set_kb_status("请先为领域添加知识库目录并启用")
-            return
-        self.settings.set_kb_status("正在重建索引…")
-        self._kb_busy = True
-        self._kb_dirs_signature = tuple(dirs)
-
-        def run() -> None:
-            try:
-                stats = self.kb.refresh(dirs)
-                summary = (f"索引完成：{stats['files']} 个文件 · {stats['chunks']} 个片段"
-                           f"（新解析 {stats['parsed']}，失败 {stats['errors']}）")
-                log.info("知识库索引完成：%s", stats)
-            except Exception as e:  # noqa: BLE001
-                summary = f"索引失败：{e}"
-                log.exception("知识库索引重建失败")
-            finally:
-                self._kb_busy = False
-            self.kb_bridge.status.emit(summary)  # 跨线程信号 → GUI 线程回写
-
-        threading.Thread(target=run, name="kb-rebuild", daemon=True).start()
+        if dirs is None:
+            dirs = self._kb_dirs_all()
+        else:
+            dirs = sorted({str(d) for d in dirs if d})
+        with self._kb_lock:
+            busy = self._kb_busy
+        self.settings.set_kb_status("索引进行中，新请求已排队…" if busy else "正在重建索引…")
+        self._start_kb_worker(dirs, signature=tuple(dirs))
 
     # —— 后端/地址显示
 
