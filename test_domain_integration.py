@@ -283,6 +283,7 @@ class DomainIntegrationTests(unittest.TestCase):
             deadline = time.time() + 8
             while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
+        gate.set()  # 兜底放行：断言失败时线程最多再挂 5 秒，不泄漏到后续用例
         # pending 真实补跑（而不只是入队）
         self.assertEqual(len(calls), 2, f"pending 未被补跑：{calls}")
         self.assertEqual(calls[1], [str(docs2)])
@@ -329,6 +330,7 @@ class DomainIntegrationTests(unittest.TestCase):
             deadline = time.time() + 8
             while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
+        gate.set()  # 兜底放行：断言失败时线程最多再挂 5 秒，不泄漏到后续用例
         self.assertEqual(calls[0], [str(docs1)])
         self.assertEqual(calls[1], [str(docs2)], "失败后 pending 被丢弃，未补跑")
         self.assertFalse(c._kb_busy)
@@ -376,6 +378,7 @@ class DomainIntegrationTests(unittest.TestCase):
             deadline = time.time() + 8
             while (len(calls) < 3 or c._kb_busy) and time.time() < deadline:
                 QTest.qWait(10)
+        gate.set()  # 兜底放行：断言失败时线程最多再挂 5 秒，不泄漏到后续用例
         self.assertEqual(calls, [[str(docs_a)], [str(docs_b)], [str(docs_a)]],
                          f"改回 A 未被排队补跑：{calls}")
         self.assertEqual(c._kb_dirs_signature, (str(docs_a),))
@@ -492,9 +495,13 @@ class SettingsFormRegressionTests(unittest.TestCase):
 
     def test_combo_ignores_wheel_without_focus(self):
         # Minor 复审回归：滚动设置页经过下拉框时，未聚焦的 QComboBox
-        # 不得响应滚轮误改选项（领域下拉一改就会切换整个表单）
+        # 不得响应滚轮误改选项（领域下拉一改就会切换整个表单）。
+        # 差分断言：向下滚（第 0 项 → 第 1 项）时，普通 QComboBox 必须变化
+        #（证明事件送达且方向有效），而 _NoWheelCombo 必须保持不变——
+        # 向上滚在第 0 项会因越界"碰巧"不变，测不出回归。
         from PySide6.QtCore import QPoint, QPointF, Qt
         from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QComboBox
 
         cfg = self._make_cfg()
         window = dongyi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
@@ -502,13 +509,22 @@ class SettingsFormRegressionTests(unittest.TestCase):
             window.reload()
             combo = window.domain_combo
             window.domain_note.setFocus()
-            before = combo.currentIndex()
-            self.assertGreater(combo.count(), 1)  # 前提：确有多个可选
+            self.assertFalse(combo.hasFocus(), "前置：被测下拉框不应持有焦点")
+            self.assertEqual(combo.currentIndex(), 0)  # 前提：从第 0 项向下滚
+
+            control = QComboBox()
+            for _ in range(combo.count()):
+                control.addItem("")
+            control.setCurrentIndex(0)
+
             event = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0),
-                                QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                                QPoint(0, -120), Qt.NoButton, Qt.NoModifier,
                                 Qt.ScrollUpdate, False)
+            QApplication.sendEvent(control, event)
+            self.assertEqual(control.currentIndex(), 1,
+                             "对照组普通 QComboBox 未响应滚轮，事件构造无效")
             QApplication.sendEvent(combo, event)
-            self.assertEqual(combo.currentIndex(), before,
+            self.assertEqual(combo.currentIndex(), 0,
                              "未聚焦的下拉框响应了滚轮，滚动页面会误改学科")
         finally:
             window.hide()

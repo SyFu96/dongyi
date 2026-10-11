@@ -233,6 +233,16 @@ def _dir_prefix(d) -> str:
     return _identity(d).rstrip("\\/") + os.sep
 
 
+def _join_identity(parent_id: str, name: str) -> str:
+    """目录身份 + 文件名 → 文件身份。
+
+    必须用 os.path.join 而非字符串拼接：盘符根目录的身份自带尾分隔符
+    （"d:\\"），直接拼会得到 "d:\\name"，与规则侧 _identity 的
+    "d:\\name" 失配，导致根目录文件的排除失效。
+    """
+    return os.path.join(parent_id, os.path.normcase(name))
+
+
 def _build_stats(chunks: list[dict]) -> tuple[list[dict[str, int]], dict[str, int], float]:
     """对一批 chunks 建检索统计：(每块词频, 词→块数, 平均块长)。
 
@@ -370,7 +380,7 @@ class KnowledgeStore:
                     parent_id = dir_ids[str(path.parent)] = _identity(path.parent)
                 # 文件身份 = 目录身份 + 文件名：目录别名（短名/链接）防得住，
                 # 又不必对每个文件做 realpath（杀软实时扫描下代价高）
-                path_id = parent_id + os.sep + os.path.normcase(path.name)
+                path_id = _join_identity(parent_id, path.name)
                 if self._excluded(path_id, rule_prefixes):
                     continue
                 try:

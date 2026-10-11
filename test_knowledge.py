@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """知识库（RAG）测试：分词、分块、索引增量更新、BM25 检索与注入门控。"""
 
+import os
 import tempfile
 import time
 import unittest
@@ -235,6 +236,25 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertEqual(store.stats()["files"], 1)
         hits = store.search("alpha", dirs=[str(alias)])  # 反向：别名过滤也命中
         self.assertTrue(hits, "别名目录过滤与真实路径扫描身份不一致")
+
+        # 同一次刷新同时传入真实与别名目录：身份去重，不得产生双份索引
+        store.refresh([str(self.docs), str(alias)])
+        self.assertEqual(store.stats()["files"], 1, "别名导致同一文件被重复索引")
+
+    def test_join_identity_handles_drive_root(self):
+        # Major 复审回归：盘符根目录的身份自带尾分隔符（"d:\\"），
+        # 字符串拼接会产生 "d:\\name" 双分隔符，与规则侧 _identity 的
+        # "d:\\name" 失配 → 根目录文件的排除失效。必须走 os.path.join。
+        self.assertEqual(knowledge._join_identity("d:\\", "private.json"),
+                         os.path.normcase("d:\\private.json"))
+        self.assertEqual(knowledge._join_identity("c:\\users\\x", "f.txt"),
+                         os.path.normcase("c:\\users\\x\\f.txt"))
+        # 与 _identity 的口径一致（同一文件两条路径身份相等）
+        real = Path(tempfile.mkdtemp()) / "root_file.json"
+        real.write_text("x", encoding="utf-8")
+        self.assertEqual(knowledge._join_identity(knowledge._identity(real.parent),
+                                                  real.name),
+                         knowledge._identity(real))
 
     def test_docx_tables_are_indexed(self):
         docx_path = self.docs / "table.docx"
