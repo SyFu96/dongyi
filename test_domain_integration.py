@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
 
 import app as huayi
+import domains
 from capture import Selection
 from test_features import FakeLlm
 
@@ -465,11 +466,17 @@ class SettingsFormRegressionTests(unittest.TestCase):
             QTest.qWait(5)
 
     def test_domain_combo_dedups_case_insensitive_aliases(self):
-        # m2 回归：大小写别名不进设置页，且保留者与运行时一致——
-        # 首个别名停用、第二个启用时，设置页必须显示"启用"的那个
-        cfg = self._make_cfg()
-        cfg["domains"]["D1"] = {"name": "d1 的停用别名", "enabled": False, "kb_dirs": [],
-                                "kb_enabled": False}
+        # m2 回归：大小写别名不进设置页，且保留者与运行时一致。
+        # 必须按"D1 停用在前、d1 启用在后"构造——若启用者在前，
+        # 简单的"取第一个"实现也能通过，测不出保留者偏好规则
+        cfg = deepcopy(huayi.DEFAULTS)
+        cfg["domains"] = {
+            "D1": {"name": "d1 的停用别名", "enabled": False, "kb_dirs": [],
+                   "kb_enabled": False},
+            "d1": {"name": "d1 正主", "enabled": True, "kb_dirs": [], "kb_enabled": False},
+        }
+        # 与运行时保留者一致：两层都应保留启用的 d1
+        self.assertEqual([did for did, _ in domains.enabled_domains(cfg)], ["d1"])
         window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
         try:
             window.reload()
@@ -477,8 +484,7 @@ class SettingsFormRegressionTests(unittest.TestCase):
                      for i in range(window.domain_combo.count())]
             lowers = [d.lower() for d in datas]
             self.assertEqual(len(lowers), len(set(lowers)))  # 无大小写重复
-            self.assertIn("d1", datas)      # 保留者是启用的正主
-            self.assertNotIn("D1", datas)   # 停用别名不显示
+            self.assertEqual(datas, ["d1"])  # 停用别名不显示，保留启用正主
         finally:
             window.hide()
             window.deleteLater()

@@ -230,6 +230,45 @@ class KnowledgeStoreTests(unittest.TestCase):
         hits = store.search("库仑效率", dirs=[str(self.docs)])
         self.assertTrue(hits)
 
+    def test_pdf_flate_filter_array_form_is_supported(self):
+        # 合法形式 /Filter [/FlateDecode]（单元素数组）不得被当未知滤镜跳页
+        import zlib
+        from pypdf import PdfWriter
+        from pypdf.generic import (ArrayObject, DictionaryObject, NameObject,
+                                   NumberObject, StreamObject)
+
+        writer = PdfWriter()
+        writer.add_blank_page(200, 200)
+        page = writer.pages[0]
+        content = b"BT /F1 12 Tf 10 10 Td (cathode flate array form) Tj ET"
+        stream = StreamObject()
+        stream[NameObject("/Filter")] = ArrayObject([NameObject("/FlateDecode")])
+        stream[NameObject("/Length")] = NumberObject(len(zlib.compress(content)))
+        stream._data = zlib.compress(content)
+        page[NameObject("/Contents")] = writer._add_object(stream)
+        font = writer._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }))
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        })
+        path = self.docs / "array.pdf"
+        with open(path, "wb") as fh:
+            writer.write(fh)
+
+        import pypdf
+        reader = pypdf.PdfReader(str(path))
+        decoded = knowledge._page_decoded_bytes(
+            reader.pages[0], knowledge.MAX_PAGE_DECODED_BYTES)
+        self.assertIsNotNone(decoded)
+        self.assertGreater(decoded, 0)
+        store = knowledge.KnowledgeStore(self.index_dir)
+        store.refresh([str(self.docs)])
+        hits = store.search("flate array form", dirs=[str(self.docs)])
+        self.assertTrue(hits, "单元素 Flate 数组滤镜的页面被误跳过")
+
     def test_refresh_search_and_stats(self):
         self._write("battery.md",
                     "# SEI\n\nThe solid electrolyte interphase (SEI) grows on the anode.\n\n"

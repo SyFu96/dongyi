@@ -120,6 +120,22 @@ def parse_file(path: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+def _normalize_filter(filt) -> list[str] | None:
+    """/Filter 值 → 滤镜名列表；解析失败返回 None。
+
+    合法形式有名字（/FlateDecode）与数组（[/FlateDecode]）两种，均需支持。
+    """
+    if filt is None:
+        return []
+    try:
+        obj = filt.get_object() if hasattr(filt, "get_object") else filt
+        if isinstance(obj, (list, tuple)):
+            return [str(x) for x in obj]
+        return [str(obj)]
+    except Exception:  # noqa: BLE001 — 结构异常按未知滤镜处理
+        return None
+
+
 def _page_decoded_bytes(page, cap: int) -> int | None:
     """页面内容流**解码后**的字节数。
 
@@ -137,11 +153,12 @@ def _page_decoded_bytes(page, cap: int) -> int | None:
             data = getattr(resolved, "_data", None)
             if data is None:
                 return None
-            filt = resolved.get("/Filter")
-            name = str(filt) if filt is not None else ""
-            if not name:
+            filters = _normalize_filter(resolved.get("/Filter"))
+            if filters is None:
+                return None
+            if not filters:
                 total += len(data)  # 未压缩：存储字节即解码后大小
-            elif name == "/FlateDecode":
+            elif filters == ["/FlateDecode"]:
                 remaining = cap - total
                 if remaining <= 0:
                     return cap + 1
@@ -153,7 +170,7 @@ def _page_decoded_bytes(page, cap: int) -> int | None:
                     return None  # 流被截断/多成员，无法安全判定
                 total += len(out)
             else:
-                return None  # 其他滤镜链无法可靠估计解码后规模
+                return None  # 其他滤镜链（含多级组合）无法可靠估计解码后规模
         return total
     except Exception:  # noqa: BLE001 — 结构异常的页面按"无法判定"处理
         return None
