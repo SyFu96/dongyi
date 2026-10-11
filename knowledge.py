@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 SUPPORTED_EXTS = {".txt", ".md", ".markdown", ".csv", ".json", ".pdf", ".docx"}
 # 单文件大小上限（PDF 解析慢，避免误选巨型文件拖垮索引）
 MAX_FILE_BYTES = 20 * 1024 * 1024
+# 单页 PDF 内容流（未解码）上限：pypdf 提取一页文本也要解析完整内容流，
+# 单页超大（常见于恶意/损坏 PDF）会先撑爆内存，必须在提取前拦截
+MAX_PAGE_STREAM_BYTES = 20 * 1024 * 1024
 # 单文件提取文本上限（磁盘大小限制不住 PDF 解压后的内容）
 MAX_TEXT_CHARS = 2_000_000
 # 全库片段总数上限（防超大语料撑爆内存与索引文件）
@@ -115,6 +118,23 @@ def parse_file(path: Path, max_chars: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+def _page_stream_bytes(page) -> int | None:
+    """单页内容流（未解码）的字节数；取不到时返回 None（不限，交给输出预算兜底）。"""
+    try:
+        raw = page.raw_get("/Contents")
+        obj = raw.get_object() if hasattr(raw, "get_object") else raw
+        items = list(obj) if isinstance(obj, (list, tuple)) else [obj]
+        total = 0
+        for item in items:
+            data = getattr(item, "_data", None)
+            if data is None:
+                return None
+            total += len(data)
+        return total or None
+    except Exception:  # noqa: BLE001 — 结构异常的页面不做预检
+        return None
+
+
 def _parse_pdf(path: Path, max_chars: int) -> str:
     from pypdf import PdfReader  # 延迟导入：未用到 PDF 时不拖慢启动
 
@@ -122,6 +142,10 @@ def _parse_pdf(path: Path, max_chars: int) -> str:
     pages = []
     total = 0
     for page in reader.pages:
+        stream_bytes = _page_stream_bytes(page)
+        if stream_bytes is not None and stream_bytes > MAX_PAGE_STREAM_BYTES:
+            log.warning("PDF 单页内容流过大（%s 字节），跳过该页：%s", stream_bytes, path)
+            continue
         try:
             pages.append(page.extract_text() or "")
         except Exception:  # noqa: BLE001 — 单页损坏不影响其余页
@@ -202,6 +226,7 @@ class KnowledgeStore:
         self._counts: list[dict[str, int]] = []
         self._df: dict[str, int] = {}
         self._avgdl = 1.0
+        self._building = False  # 后台统计构建进行中（防止重复调度）
         # 每条排除规则同时按文件精确匹配与目录前缀匹配（目录可能尚不存在，
         # 无法靠 is_dir() 判别，两种都试最稳妥）
         self._exclude_rules = [(_norm_file(p), _norm_dir(str(p)))
@@ -213,8 +238,26 @@ class KnowledgeStore:
     def _preheat(self) -> None:
         try:
             self._ensure_stats()
-        except Exception:  # noqa: BLE001 — 预热失败留给首次检索兜底
+        except Exception:  # noqa: BLE001 — 预热失败留给下次调度重试
             log.debug("知识库统计预热失败", exc_info=True)
+        finally:
+            with self._lock:
+                self._building = False
+
+    def _stats_ready_or_schedule(self):
+        """统计就绪返回快照；未就绪交给后台构建并返回 None。
+
+        供 GUI 线程的 search/stats 使用：绝不同步构建全库统计——
+        未就绪期间检索返回空、统计返回 0，构建完成后自然恢复。
+        """
+        with self._lock:
+            if self._built_gen == self._index_gen:
+                return self._stats_chunks, self._counts, self._df, self._avgdl
+            building = self._building
+            self._building = True
+        if not building:
+            threading.Thread(target=self._preheat, name="kb-preheat", daemon=True).start()
+        return None
 
     def _excluded(self, path: Path) -> bool:
         normalized = _norm_file(path)
@@ -321,6 +364,7 @@ class KnowledgeStore:
             self._counts, self._df, self._avgdl = counts, df, avgdl
             self._index_gen += 1
             self._built_gen = self._index_gen  # 统计与索引同代发布
+            self._building = False
             stats = {"files": len(indexed), "chunks": len(new_chunks),
                      "parsed": parsed, "errors": errors}
         self._save()
@@ -355,7 +399,10 @@ class KnowledgeStore:
         terms = set(tokenize(query))
         if not terms:
             return []
-        chunks, counts, df, avgdl = self._ensure_stats()
+        snapshot = self._stats_ready_or_schedule()
+        if snapshot is None:  # 统计后台构建中：本次不阻塞 GUI，返回空结果
+            return []
+        chunks, counts, df, avgdl = snapshot
         n = len(chunks)
         if not n:
             return []
@@ -389,7 +436,10 @@ class KnowledgeStore:
                 for s, i in scored[:top_k]]
 
     def stats(self, dirs: list[str] | None = None) -> dict:
-        chunks, *_ = self._ensure_stats()
+        snapshot = self._stats_ready_or_schedule()
+        if snapshot is None:  # 统计后台构建中：先报 0，构建完成后自然恢复
+            return {"files": 0, "chunks": 0}
+        chunks = snapshot[0]
         with self._lock:
             files = dict(self._files)
         if dirs:

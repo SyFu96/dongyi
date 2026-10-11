@@ -319,9 +319,18 @@ class SettingsWindow(QWidget):
     def _load_domain_combo(self, active: str | None = None) -> None:
         self.domain_combo.blockSignals(True)
         self.domain_combo.clear()
-        for did, dom in sorted(self._domains.items()):
-            if domains.valid_id(did) and isinstance(dom, dict):
-                self.domain_combo.addItem((dom.get("name") or did), did)
+        seen: set[str] = set()
+        # 按 config 插入顺序去重（与运行时 enabled_domains 的保留者一致），
+        # 大小写别名不进 UI——否则别名条目能借"清空/计数"动到保留领域的翻译记忆
+        for did, dom in self._domains.items():
+            if not (domains.valid_id(did) and isinstance(dom, dict)):
+                continue
+            key = did.lower()
+            if key in seen:
+                log.warning("领域 id %s 与已有领域仅大小写不同，设置页不显示该别名", did)
+                continue
+            seen.add(key)
+            self.domain_combo.addItem((dom.get("name") or did), did)
         self.domain_combo.blockSignals(False)
         if active:
             for i in range(self.domain_combo.count()):

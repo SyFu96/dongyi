@@ -343,6 +343,7 @@ class App(QObject):
         self.tmstore = tm.TmStore(DATA_DIR / "tm")
         self._kb_busy = False
         self._kb_pending_dirs: list[str] | None = None  # 索引忙时暂存的最新目录集合
+        self._kb_inflight: list[str] | None = None      # 当前在途刷新的目录集合
         self._kb_lock = threading.Lock()
         self._kb_dirs_signature: tuple[str, ...] = ()
         self.popup = PopupWindow(cfg)
@@ -761,9 +762,28 @@ class App(QObject):
         """知识库目录集合变化时后台增量刷新索引。"""
         dirs = self._kb_dirs_all()
         signature = tuple(dirs)
-        if not force and signature == self._kb_dirs_signature:
+        if not force and self._kb_target_satisfied(signature):
             return
         self._start_kb_worker(dirs, signature)
+
+    def _kb_target_satisfied(self, signature: tuple[str, ...]) -> bool:
+        """目标目录是否无需再刷新。
+
+        - 已完成该目标，且没有在途/待办任务会用其他目录覆盖索引；
+        - 或该目标正在刷新 / 已在待办队列中（不重复排队）。
+        只比对"已完成签名"不够：签名=A、在途=B 时改回 A，若在此短路，
+        B 完成后索引就与当前配置不一致了。
+        """
+        with self._kb_lock:
+            if signature == self._kb_dirs_signature:
+                if self._kb_inflight is None and self._kb_pending_dirs is None:
+                    return True
+                return False
+            if self._kb_inflight is not None and tuple(self._kb_inflight) == signature:
+                return True
+            if self._kb_pending_dirs is not None and tuple(self._kb_pending_dirs) == signature:
+                return True
+        return False
 
     def _start_kb_worker(self, dirs: list[str], signature: tuple[str, ...] | None = None) -> None:
         """启动（或并入）一次索引刷新：已有任务在跑时把目录暂存为待办。"""
@@ -778,31 +798,34 @@ class App(QObject):
     def _kb_worker_run(self, dirs: list[str], signature: tuple[str, ...] | None) -> None:
         """索引工作循环：串行消费 pending，交接在同一把锁内完成（无窗口）。
 
-        - 签名只在刷新成功后提交：失败不阻塞下次相同配置的重试；
+        - 签名只在刷新成功后提交：失败轮不提交，但同样交接 pending（不丢待办）；
         - busy 的清除与 pending 的读取在同一锁持有期内：期间任何新请求
           都会先看到 busy=True 并写入 pending，随后被本循环取走，不会丢失。
         """
         current, current_sig = dirs, signature
         while current is not None:
+            with self._kb_lock:
+                self._kb_inflight = list(current)
+            ok = False
             try:
                 stats = self.kb.refresh(current)
+                ok = True
             except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
                 log.exception("知识库索引刷新失败")
-                with self._kb_lock:
-                    self._kb_pending_dirs = None
-                    self._kb_busy = False
-                return
-            if current_sig is not None:
-                with self._kb_lock:
-                    self._kb_dirs_signature = current_sig
-            log.info("知识库索引完成：%s", stats)
-            self.kb_bridge.status.emit(
-                f"索引完成：{stats['files']} 个文件 · {stats['chunks']} 个片段"
-                f"（新解析 {stats['parsed']}，失败 {stats['errors']}）")
+            if ok:
+                if current_sig is not None:
+                    with self._kb_lock:
+                        self._kb_dirs_signature = current_sig
+                log.info("知识库索引完成：%s", stats)
+                self.kb_bridge.status.emit(
+                    f"索引完成：{stats['files']} 个文件 · {stats['chunks']} 个片段"
+                    f"（新解析 {stats['parsed']}，失败 {stats['errors']}）")
+            # 成败都交接：pending 在同一锁持有期内取出，期间的新请求不会丢失
             with self._kb_lock:
                 current = self._kb_pending_dirs
                 self._kb_pending_dirs = None
                 current_sig = tuple(current) if current is not None else None
+                self._kb_inflight = list(current) if current is not None else None
                 if current is None:
                     self._kb_busy = False
 

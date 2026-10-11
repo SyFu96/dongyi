@@ -240,12 +240,12 @@ class DomainIntegrationTests(unittest.TestCase):
 
         with patch.object(huayi, "TmEditDialog", FakeDialog):
             c.on_tm_save("translate")
-        entries = c.tmstore._load(c.tmstore.path_for("battery"))[0]  # 领域快照 = battery
+        entries = c.tmstore._load("battery")[0]  # 领域快照 = battery
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["src"], "The SEI forms here.")  # 快照，不是新取词
         self.assertEqual(entries[0]["tgt"], "SEI 在此形成。")
         # 通用模式的记忆不受影响
-        self.assertEqual(c.tmstore._load(c.tmstore.path_for(""))[0], [])
+        self.assertEqual(c.tmstore._load("")[0], [])
 
     def test_kb_pending_dirs_are_actually_processed(self):
         # M3 回归：索引忙时到来的目录变更，必须在工作循环结束后被真实补跑
@@ -288,6 +288,88 @@ class DomainIntegrationTests(unittest.TestCase):
         self.assertFalse(c._kb_busy)
         self.assertIsNone(c._kb_pending_dirs)
         self.assertIn("second corpus", c.kb.search("second corpus")[0]["text"])
+
+    def test_kb_failure_hands_over_pending_and_keeps_signature_clean(self):
+        # M3 回归：A 失败时已排队的 B 必须补跑（不丢待办）；失败轮不提交签名
+        c = self.controller
+        docs1 = self.base / "fail1"
+        docs1.mkdir()
+        (docs1 / "a.txt").write_text("first corpus text", encoding="utf-8")
+        docs2 = self.base / "fail2"
+        docs2.mkdir()
+        (docs2 / "b.txt").write_text("second corpus text", encoding="utf-8")
+        calls: list[list[str]] = []
+        real_refresh = c.kb.refresh
+
+        def flaky_refresh(dirs):
+            calls.append(list(dirs))
+            if len(calls) == 1:
+                raise RuntimeError("simulated index failure")
+            return real_refresh(dirs)
+
+        c._cfg["domains"]["battery"]["kb_enabled"] = True
+        c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs1)]
+        with patch.object(c.kb, "refresh", flaky_refresh):
+            c._maybe_refresh_kb()  # A（将失败）
+            deadline = time.time() + 2
+            while not calls and time.time() < deadline:
+                QTest.qWait(10)
+            c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs2)]
+            c._maybe_refresh_kb()  # A 还在"跑"（异常抛出前后都算 busy）→ pending B
+            deadline = time.time() + 3
+            while (len(calls) < 2 or c._kb_busy) and time.time() < deadline:
+                QTest.qWait(10)
+        self.assertEqual(calls[0], [str(docs1)])
+        self.assertEqual(calls[1], [str(docs2)], "失败后 pending 被丢弃，未补跑")
+        self.assertFalse(c._kb_busy)
+        # 签名最终 = 成功轮 B；失败轮 A 未提交
+        self.assertEqual(c._kb_dirs_signature, (str(docs2),))
+        self.assertIn("second corpus", c.kb.search("second corpus")[0]["text"])
+
+    def test_kb_revert_while_inflight_is_not_short_circuited(self):
+        # M3 回归：已完成签名 A、在途 B 时改回 A——不能被"签名已达成"短路，
+        # 否则 B 完成后索引与当前配置不一致
+        c = self.controller
+        docs_a = self.base / "rev_a"
+        docs_a.mkdir()
+        (docs_a / "a.txt").write_text("alpha corpus text", encoding="utf-8")
+        docs_b = self.base / "rev_b"
+        docs_b.mkdir()
+        (docs_b / "b.txt").write_text("beta corpus text", encoding="utf-8")
+        calls: list[list[str]] = []
+        gate = threading.Event()
+        real_refresh = c.kb.refresh
+
+        def slow_refresh(dirs):
+            calls.append(list(dirs))
+            result = real_refresh(dirs)
+            if len(calls) == 2:
+                gate.wait(2)  # 挂起 B 轮，制造"签名=A、在途=B"窗口
+            return result
+
+        c._cfg["domains"]["battery"]["kb_enabled"] = True
+        c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_a)]
+        with patch.object(c.kb, "refresh", slow_refresh):
+            c._maybe_refresh_kb()  # A 完成，签名 = A
+            deadline = time.time() + 2
+            while not calls and time.time() < deadline:
+                QTest.qWait(10)
+            c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_b)]
+            c._maybe_refresh_kb()  # B 开始（阻塞在 gate）
+            deadline = time.time() + 2
+            while len(calls) < 2 and time.time() < deadline:
+                QTest.qWait(10)
+            self.assertEqual(c._kb_inflight, [str(docs_b)])
+            c._cfg["domains"]["battery"]["kb_dirs"] = [str(docs_a)]
+            c._maybe_refresh_kb()  # 改回 A：必须排队，不能短路
+            gate.set()
+            deadline = time.time() + 3
+            while (len(calls) < 3 or c._kb_busy) and time.time() < deadline:
+                QTest.qWait(10)
+        self.assertEqual(calls, [[str(docs_a)], [str(docs_b)], [str(docs_a)]],
+                         f"改回 A 未被排队补跑：{calls}")
+        self.assertEqual(c._kb_dirs_signature, (str(docs_a),))
+        self.assertFalse(c._kb_busy)
 
     def test_kb_rebuild_none_uses_saved_config_and_empty_list_clears(self):
         # 复核新问题 1 的语义修复：None = 用已保存配置；[] = 用户刚清空全部目录
@@ -368,6 +450,26 @@ class SettingsFormRegressionTests(unittest.TestCase):
             window.domain_enabled.setChecked(False)
             window._rebuild_kb()
             self.assertEqual(captured[-1], ["D:/kb/two"])
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
+    def test_domain_combo_dedups_case_insensitive_aliases(self):
+        # m2 回归：大小写别名不进设置页——否则别名条目能借"清空/计数"动到
+        # 保留领域的翻译记忆
+        cfg = self._make_cfg()
+        cfg["domains"]["D1"] = {"name": "d1 的别名", "enabled": True, "kb_dirs": [],
+                                "kb_enabled": False}
+        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        try:
+            window.reload()
+            datas = [window.domain_combo.itemData(i)
+                     for i in range(window.domain_combo.count())]
+            lowers = [d.lower() for d in datas]
+            self.assertEqual(len(lowers), len(set(lowers)))  # 无大小写重复
+            self.assertIn("d1", datas)
+            self.assertNotIn("D1", datas)
         finally:
             window.hide()
             window.deleteLater()

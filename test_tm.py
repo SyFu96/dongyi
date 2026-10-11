@@ -44,6 +44,44 @@ class TmStoreTests(unittest.TestCase):
         text = self.store.example_context("battery", "old sentence")
         self.assertIn("旧句对", text)
 
+    def test_migration_never_steals_ambiguous_namespaces(self):
+        # id "general"：旧名与通用模式现行文件同名，不得搬走通用数据
+        general_file = self.store.path_for("").parent / "general.jsonl"
+        general_file.parent.mkdir(parents=True, exist_ok=True)
+        general_file.write_text('{"src": "g", "tgt": "通用句对"}\n', encoding="utf-8")
+        self.assertEqual(self.store.count("general"), 0)  # 不迁移
+        self.assertEqual(self.store.count(""), 1)         # 通用文件原地未动
+        self.assertTrue(general_file.exists())
+        # id "dom_battery"：去掉前缀的"旧名"恰是 battery 领域的新名文件，不得搬走
+        battery_file = self.store.path_for("battery")
+        battery_file.write_text('{"src": "b", "tgt": "battery句对"}\n', encoding="utf-8")
+        self.assertEqual(self.store.count("dom_battery"), 0)
+        self.assertEqual(self.store.count("battery"), 1)  # battery 文件原地未动
+
+    def test_clear_also_removes_legacy_so_no_resurrection(self):
+        # 新旧并存时以新文件为准；清空必须连旧文件一起删，
+        # 否则下次 _load 又把它迁移回来，"清空"名存实亡
+        new_path = self.store.path_for("battery")
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text('{"src": "new", "tgt": "新文件"}\n', encoding="utf-8")
+        legacy = new_path.parent / "battery.jsonl"
+        legacy.write_text('{"src": "old", "tgt": "旧文件"}\n', encoding="utf-8")
+        self.assertEqual(self.store.count("battery"), 1)  # 并存：新文件生效
+        self.assertEqual(self.store.clear("battery"), 1)
+        self.assertFalse(new_path.exists())
+        self.assertFalse(legacy.exists())
+        self.assertEqual(self.store.count("battery"), 0)  # 无回流
+        self.assertEqual(self.store.count("battery"), 0)  # 再次访问也不回流
+
+    def test_append_migrates_legacy_first(self):
+        # append 先迁移：否则新文件会遮蔽尚未迁移的旧句对
+        legacy = self.store.path_for("battery").parent / "battery.jsonl"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text('{"src": "old", "tgt": "旧句对"}\n', encoding="utf-8")
+        self.assertTrue(self.store.append("battery", "new src", "新句对"))
+        entries = self.store._load("battery")[0]
+        self.assertEqual(len(entries), 2)  # 旧句对 + 新写入共存
+
     def test_new_file_wins_when_both_exist(self):
         new_path = self.store.path_for("battery")
         new_path.parent.mkdir(parents=True, exist_ok=True)

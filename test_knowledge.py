@@ -73,6 +73,7 @@ class KnowledgeStoreTests(unittest.TestCase):
 
         thread_errors: list[Exception] = []
         stop = threading.Event()
+        refresh_count = {"n": 0}
 
         def refresher() -> None:
             n = 0
@@ -81,6 +82,7 @@ class KnowledgeStoreTests(unittest.TestCase):
                     text = gen_b if n % 2 == 0 else gen_a
                     (self.docs / "f0.txt").write_text(text, encoding="utf-8")
                     store.refresh([str(self.docs)])
+                    refresh_count["n"] += 1
                     n += 1
             except Exception as e:  # noqa: BLE001 — 传回主线程断言
                 thread_errors.append(e)
@@ -88,16 +90,21 @@ class KnowledgeStoreTests(unittest.TestCase):
         thread = threading.Thread(target=refresher, daemon=True)
         thread.start()
         try:
-            for _ in range(40):
+            # 持续查询直到确认多轮刷新已完成：保证并发真正发生并发生交错，
+            # 而不是 40 次查询全部打在初始快照上"虚假通过"
+            deadline = time.time() + 3
+            while refresh_count["n"] < 3 and time.time() < deadline:
                 hits = store.search("alpha", dirs=[str(self.docs)])
                 for hit in hits:
                     self.assertIn("alpha", hit["text"].lower(),
                                   f"返回了不含查询词的片段（评分与文本不同代）：{hit}")
                     self.assertIn(hit["text"], known_texts)
+                time.sleep(0.001)
         finally:
             stop.set()
             thread.join(5)
         self.assertEqual(thread_errors, [])
+        self.assertGreaterEqual(refresh_count["n"], 3, "并发刷新未真正发生，测试无效")
 
     def test_old_version_index_is_discarded(self):
         # M7 回归：旧版本索引（可能含此后才被排除的敏感文件）整体废弃，不参与检索
@@ -135,6 +142,18 @@ class KnowledgeStoreTests(unittest.TestCase):
             self.assertTrue(record["complete"])
             self.assertEqual(record["chunks"], 2)
             self.assertIn("丁", store.search("丁丁", dirs=[str(self.docs)])[0]["text"])
+            # 完整缓存被排序更靠前的新文件挤占：0.txt 先占 2 块额度，
+            # b（完整缓存 2 块）只能保留 1 块 → complete=False，等待补齐
+            self._write("0.txt", "\n\n".join(["戊" * 300, "己" * 300]))
+            store.refresh([str(self.docs)])
+            record = store._files[str(self.docs / "b.txt")]
+            self.assertFalse(record["complete"], "完整缓存被挤占后应标记不完整")
+            self.assertEqual(record["chunks"], 1)
+            (self.docs / "0.txt").unlink()  # 容量再释放
+            store.refresh([str(self.docs)])
+            record = store._files[str(self.docs / "b.txt")]
+            self.assertTrue(record["complete"])
+            self.assertEqual(record["chunks"], 2)
 
     def test_avgdl_counts_all_tokens_not_unique(self):
         # M1 回归：平均块长必须与评分的块长同口径（全部 token 数），
@@ -241,8 +260,18 @@ class KnowledgeStoreTests(unittest.TestCase):
         self._write("keep.txt", "persisted knowledge about cathode materials")
         knowledge.KnowledgeStore(self.index_dir).refresh([str(self.docs)])
         store2 = knowledge.KnowledgeStore(self.index_dir)
+        # 统计由后台预热：GUI 线程的 search/stats 在就绪前返回空/0（M9 语义），
+        # 轮询等待预热完成
+        deadline = time.time() + 2
+        while store2.stats()["files"] == 0 and time.time() < deadline:
+            time.sleep(0.02)
         self.assertEqual(store2.stats()["files"], 1)
-        self.assertIn("cathode", store2.search("cathode")[0]["text"])
+        hits: list[dict] = []
+        deadline = time.time() + 2
+        while not hits and time.time() < deadline:
+            hits = store2.search("cathode")
+            time.sleep(0.02)
+        self.assertIn("cathode", hits[0]["text"])
 
     def test_unreadable_files_are_skipped(self):
         self._write("bad.pdf", "这不是真正的 PDF 二进制内容")

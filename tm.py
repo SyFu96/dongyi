@@ -62,27 +62,34 @@ class TmStore:
             safe = "general"
         return self._dir / f"{safe}.jsonl"
 
-    def _migrate_legacy(self, path: Path) -> None:
-        """旧版（v0.1 领域适配首发）文件名是 tm/<id>.jsonl，现改为 dom_<id小写>.jsonl。
+    def _legacy_path(self, domain_id: str) -> Path | None:
+        """旧版（v0.1 领域适配首发）文件名 tm/<id>.jsonl；无法无歧义判定时返回 None。
 
-        目标文件不存在而旧文件存在时整体改名迁移；两者并存时以新文件为准
-        （旧文件保留在磁盘上，不再参与读写）。
+        - 通用模式：旧名就是现行名 general.jsonl，无迁移可言；
+        - id 为 "general" 或以 "dom_" 开头：去掉前缀得到的"旧名"会与现行
+          命名空间（通用文件或其他领域的新名文件）冲突，无法判定归属，
+          保守跳过（宁可少迁不可错拿别人的数据）；
+        - 其余合法 id：旧名 <id小写>.jsonl。
         """
-        name = path.name
-        if not name.startswith("dom_"):
-            return
-        legacy = self._dir / name[len("dom_"):]
-        if not legacy.is_file() or path.exists():
+        raw = (domain_id or "").strip().lower()
+        if not raw or raw == "general" or raw.startswith("dom_"):
+            return None
+        return self._dir / f"{raw}.jsonl"
+
+    def _migrate_legacy(self, domain_id: str, path: Path) -> None:
+        legacy = self._legacy_path(domain_id)
+        if legacy is None or path.exists() or not legacy.is_file():
             return
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             os.replace(legacy, path)
-            log.info("翻译记忆已迁移：%s → %s", legacy.name, name)
+            log.info("翻译记忆已迁移：%s → %s", legacy.name, path.name)
         except OSError:
             log.warning("翻译记忆迁移失败：%s", legacy, exc_info=True)
 
-    def _load(self, path: Path) -> tuple[list[dict], list[set]]:
-        self._migrate_legacy(path)
+    def _load(self, domain_id: str) -> tuple[list[dict], list[set]]:
+        path = self.path_for(domain_id)
+        self._migrate_legacy(domain_id, path)
         try:
             stat = path.stat()
             stamp = (stat.st_mtime, stat.st_size)
@@ -120,6 +127,8 @@ class TmStore:
         if not src or not tgt:
             return False
         path = self.path_for(domain_id)
+        # 首写前先迁移：否则新文件的 mtime/size 会让尚未迁移的旧句对永远被遮蔽
+        self._migrate_legacy(domain_id, path)
         try:
             self._dir.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
@@ -133,13 +142,17 @@ class TmStore:
         return True
 
     def count(self, domain_id: str) -> int:
-        return len(self._load(self.path_for(domain_id))[0])
+        return len(self._load(domain_id)[0])
 
     def clear(self, domain_id: str) -> int:
         path = self.path_for(domain_id)
-        removed = len(self._load(path)[0])
+        removed = len(self._load(domain_id)[0])
         try:
             path.unlink(missing_ok=True)
+            # 旧文件一并删除：否则下次 _load 会把它再迁移回来，"清空"名存实亡
+            legacy = self._legacy_path(domain_id)
+            if legacy is not None:
+                legacy.unlink(missing_ok=True)
         except OSError:
             log.warning("清空翻译记忆失败：%s", path, exc_info=True)
             return 0
@@ -155,7 +168,7 @@ class TmStore:
         text = (text or "").strip()
         if not text:
             return ""
-        entries, token_sets = self._load(self.path_for(domain_id))
+        entries, token_sets = self._load(domain_id)
         # 先切片再配对：只处理最近条目，不为整库构造中间列表
         entries = entries[-MAX_SCAN_ENTRIES:]
         token_sets = token_sets[-MAX_SCAN_ENTRIES:]
