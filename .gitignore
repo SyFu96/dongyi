@@ -7,6 +7,12 @@ __pycache__/
 config.json
 *.log
 
+# 用户个人数据（源码运行时写在仓库目录内）
+tm/
+kb_index/
+glossaries/*
+!glossaries/battery.csv
+
 # 编辑器 / 工具
 .commandcode/
 .idea/

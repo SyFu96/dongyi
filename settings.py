@@ -53,7 +53,8 @@ class SettingsWindow(QWidget):
     saved = Signal()
     models_loaded = Signal(list)
     test_result = Signal(bool, str)
-    rebuild_requested = Signal()  # 「重建索引」：由 App 在后台执行并回写状态
+    # 「重建索引」携带工作副本中的知识库目录（可能尚未保存），由 App 后台执行并回写状态
+    rebuild_requested = Signal(list)
 
     def __init__(self, cfg: dict, data_dir: Path | None = None,
                  kb_store=None, tm_store=None) -> None:
@@ -63,6 +64,7 @@ class SettingsWindow(QWidget):
         self._kb = kb_store
         self._tm = tm_store
         self._domains: dict = {}
+        self._loading_form = False  # 表单载入期间阻断控件信号回写工作副本
         self.setWindowTitle("划译 — 设置")
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # 置顶，避免被划词弹窗挡住
         self.resize(640, 880)
@@ -331,35 +333,44 @@ class SettingsWindow(QWidget):
     def _load_domain_form(self) -> None:
         did = self._current_domain_id()
         has = bool(did)
-        for widget in (self.domain_name, self.domain_note, self.domain_enabled,
-                       self.chk_kb, self.chk_kb_translate, self.btn_glo_new,
-                       self.btn_glo_edit, self.btn_kb_add, self.btn_kb_remove,
-                       self.btn_kb_rebuild, self.btn_tm_clear, self.kb_dirs):
-            widget.setEnabled(has)
-        if not has:
-            self.domain_name.clear()
-            self.domain_note.clear()
-            self.domain_enabled.setChecked(False)
-            self.chk_kb.setChecked(False)
-            self.chk_kb_translate.setChecked(False)
+        # 载入期间阻断回写：setText/setChecked 会触发 textChanged/toggled，
+        # 若不阻断，先设置的控件会把"尚未载入的旧值"写回正在载入的领域配置
+        # （典型后果：切换领域后 kb_dirs 被上一个领域的目录污染）。
+        self._loading_form = True
+        try:
+            for widget in (self.domain_name, self.domain_note, self.domain_enabled,
+                           self.chk_kb, self.chk_kb_translate, self.btn_glo_new,
+                           self.btn_glo_edit, self.btn_kb_add, self.btn_kb_remove,
+                           self.btn_kb_rebuild, self.btn_tm_clear, self.kb_dirs):
+                widget.setEnabled(has)
+            if not has:
+                self.domain_name.clear()
+                self.domain_note.clear()
+                self.domain_enabled.setChecked(False)
+                self.chk_kb.setChecked(False)
+                self.chk_kb_translate.setChecked(False)
+                self.kb_dirs.clear()
+                self.lbl_glossary.setText("还没有领域：点「新建」创建一个（如 医学、法律）。")
+                self.lbl_kb_status.setText("")
+                self.lbl_tm_count.setText("")
+                return
+            dom = self._domains.get(did) or {}
+            self.domain_name.setText(dom.get("name") or "")
+            self.domain_note.setPlainText(dom.get("note") or "")
+            self.domain_enabled.setChecked(bool(dom.get("enabled", True)))
+            self.chk_kb.setChecked(bool(dom.get("kb_enabled")))
+            self.chk_kb_translate.setChecked(bool(dom.get("kb_for_translate")))
             self.kb_dirs.clear()
-            self.lbl_glossary.setText("还没有领域：点「新建」创建一个（如 医学、法律）。")
-            self.lbl_kb_status.setText("")
-            self.lbl_tm_count.setText("")
-            return
-        dom = self._domains.get(did) or {}
-        self.domain_name.setText(dom.get("name") or "")
-        self.domain_note.setPlainText(dom.get("note") or "")
-        self.domain_enabled.setChecked(bool(dom.get("enabled", True)))
-        self.chk_kb.setChecked(bool(dom.get("kb_enabled")))
-        self.chk_kb_translate.setChecked(bool(dom.get("kb_for_translate")))
-        self.kb_dirs.clear()
-        for d in dom.get("kb_dirs") or []:
-            self.kb_dirs.addItem(str(d))
+            for d in dom.get("kb_dirs") or []:
+                self.kb_dirs.addItem(str(d))
+        finally:
+            self._loading_form = False
         self._refresh_domain_status()
 
     def _sync_form_to_work(self, *_args) -> None:
         """表单任何改动立即写入工作副本，切选/保存时不丢编辑。"""
+        if self._loading_form:
+            return
         did = self._current_domain_id()
         if not did:
             return
@@ -485,7 +496,9 @@ class SettingsWindow(QWidget):
 
     def _rebuild_kb(self) -> None:
         self._sync_form_to_work()
-        self.rebuild_requested.emit()
+        # 带上工作副本里的目录（未保存也生效：索引只是缓存），否则 App 会读到旧配置
+        dirs = [self.kb_dirs.item(i).text() for i in range(self.kb_dirs.count())]
+        self.rebuild_requested.emit(dirs)
 
     def set_kb_status(self, text: str) -> None:
         """App 后台重建索引后的状态回写。"""

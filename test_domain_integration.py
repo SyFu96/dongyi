@@ -180,6 +180,96 @@ class DomainIntegrationTests(unittest.TestCase):
         c.popup.domain_combo.setCurrentIndex(index)  # 用户在下拉里选择
         self.assertEqual(c._cfg["active_domain"], "battery")
 
+    def test_explain_page_has_no_tm_button_and_save_is_rejected(self):
+        # M5 回归：解释不是译文，不能进翻译记忆
+        from PySide6.QtWidgets import QPushButton
+        c = self.controller
+        self.open_selection()
+        translate_buttons = [b.text() for b in c.popup.tabs.widget(0).findChildren(QPushButton)]
+        explain_buttons = [b.text() for b in c.popup.tabs.widget(1).findChildren(QPushButton)]
+        self.assertIn("存为记忆", translate_buttons)
+        self.assertNotIn("存为记忆", explain_buttons)
+        # 入口二次校验：即使收到 explain 的保存信号也不写入
+        before = c.tmstore.count("battery")
+        c.set_domain("battery")
+        c.on_tm_save("explain")
+        self.assertEqual(c.tmstore.count("battery"), before)
+
+    def test_kb_dir_change_while_busy_is_not_lost(self):
+        # M3 回归：索引忙时到来的目录变更必须被记录补跑，而不是被签名吞掉
+        c = self.controller
+        c._kb_busy = True
+        try:
+            c._maybe_refresh_kb()  # 启动时触发一次（busy → 进 pending）
+            c._cfg["domains"]["battery"]["kb_enabled"] = True
+            c._cfg["domains"]["battery"]["kb_dirs"] = [str(self.base / "docs")]
+            c._maybe_refresh_kb()  # 目录变化 → 仍 busy → 记录 pending
+            with c._kb_pending_lock:
+                self.assertEqual(c._kb_pending_dirs, [str(self.base / "docs")])
+        finally:
+            c._kb_busy = False
+            with c._kb_pending_lock:
+                c._kb_pending_dirs = None
+
+
+class SettingsFormRegressionTests(unittest.TestCase):
+    """C1 回归：表单载入/切换领域的信号回写不得污染领域配置。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt = QApplication.instance() or QApplication([])
+
+    def _make_cfg(self):
+        cfg = deepcopy(huayi.DEFAULTS)
+        cfg["domains"] = {
+            "d1": {"name": "领域一", "note": "说明一", "enabled": True,
+                   "glossary_file": "", "kb_dirs": ["D:/kb/one"],
+                   "kb_enabled": True, "kb_for_translate": False},
+            "d2": {"name": "领域二", "note": "说明二", "enabled": False,
+                   "glossary_file": "", "kb_dirs": [],
+                   "kb_enabled": False, "kb_for_translate": True},
+        }
+        return cfg
+
+    def test_open_switch_and_save_keeps_domains_intact(self):
+        cfg = self._make_cfg()
+        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        try:
+            window.reload()
+            combo = window.domain_combo
+            # 多轮来回切换（旧 bug：切换后 kb_dirs/说明被上一个领域污染）
+            for _ in range(3):
+                combo.setCurrentIndex(combo.findData("d2"))
+                combo.setCurrentIndex(combo.findData("d1"))
+            window._on_save()
+            d1, d2 = cfg["domains"]["d1"], cfg["domains"]["d2"]
+            self.assertEqual(d1["note"], "说明一")
+            self.assertEqual(d1["kb_dirs"], ["D:/kb/one"])
+            self.assertTrue(d1["kb_enabled"])
+            self.assertFalse(d1["kb_for_translate"])
+            self.assertEqual(d2["note"], "说明二")
+            self.assertEqual(d2["kb_dirs"], [])
+            self.assertFalse(d2["enabled"])
+            self.assertTrue(d2["kb_for_translate"])
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
+    def test_empty_domains_form_is_safe(self):
+        cfg = self._make_cfg()
+        cfg["domains"] = {}
+        window = huayi.SettingsWindow(cfg, Path(tempfile.gettempdir()), None, None)
+        try:
+            window.reload()
+            self.assertEqual(window.domain_combo.count(), 0)
+            window._on_save()
+            self.assertEqual(cfg["domains"], {})
+        finally:
+            window.hide()
+            window.deleteLater()
+            QTest.qWait(5)
+
 
 if __name__ == "__main__":
     unittest.main()

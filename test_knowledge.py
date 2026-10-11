@@ -53,6 +53,70 @@ class KnowledgeStoreTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return path
 
+    def test_avgdl_counts_all_tokens_not_unique(self):
+        # M1 回归：平均块长必须与评分的块长同口径（全部 token 数），
+        # 否则重复词多的块被错误惩罚
+        self._write("repeat.txt", "alpha alpha alpha alpha")
+        self._write("once.txt", "beta gamma delta epsilon")
+        store = knowledge.KnowledgeStore(self.index_dir)
+        store.refresh([str(self.docs)])
+        _chunks, _counts, _df, avgdl = store._ensure_stats()
+        # repeat 块 4 个 token，once 块 4 个 token → 平均 4（旧实现会算成 2）
+        self.assertAlmostEqual(avgdl, 4.0)
+        hits = store.search("alpha", dirs=[str(self.docs)])
+        self.assertTrue(hits)
+
+    def test_excluded_paths_are_never_indexed(self):
+        # M7 回归：config.json 等排除项不得进入索引（含密钥文件外发风险）
+        secret = self._write("config.json", 'cloud api key sk-FAKE-SECRET-KEY battery')
+        store = knowledge.KnowledgeStore(self.index_dir, exclude=[secret])
+        stats = store.refresh([str(self.docs)])
+        self.assertEqual(stats["files"], 0)
+        self.assertEqual(store.search("FAKE-SECRET-KEY"), [])
+        secret.unlink()  # 清掉上一段的文件，只验证下面的目录前缀排除
+        # 目录前缀排除（目录可以不存在）
+        store2 = knowledge.KnowledgeStore(
+            self.index_dir / "s2", exclude=[self.docs / "sub"])
+        self._write("keep.txt", "cathode material text")
+        (self.docs / "sub").mkdir()
+        self._write("sub/inner.md", "anode material text")
+        store2.refresh([str(self.docs)])
+        self.assertEqual(store2.stats()["files"], 1)
+        self.assertEqual(store2.search("anode"), [])
+        # 索引目录位于扫描范围内时整体排除自身（App 的真实场景：kb_index 在数据目录里）
+        store3 = knowledge.KnowledgeStore(self.index_dir)
+        store3.refresh([str(self.index_dir)])
+        self.assertEqual(store3.stats()["files"], 0)
+        self.assertEqual(store3.search("version"), [])
+
+    def test_gbk_text_falls_back_to_gb18030(self):
+        # m3 回归：GBK 中文不能被 errors=replace 洗成乱码照常索引
+        path = self.docs / "gbk.txt"
+        path.write_text("磷酸铁锂电池的正极材料", encoding="gbk")
+        store = knowledge.KnowledgeStore(self.index_dir)
+        store.refresh([str(self.docs)])
+        hits = store.search("磷酸铁锂", dirs=[str(self.docs)])
+        self.assertTrue(hits)
+        self.assertIn("磷酸铁锂", hits[0]["text"])
+
+    def test_docx_tables_are_indexed(self):
+        docx_path = self.docs / "table.docx"
+        try:
+            import docx as docx_lib
+            document = docx_lib.Document()
+            document.add_paragraph("电池术语表如下。")
+            table = document.add_table(rows=1, cols=2)
+            table.rows[0].cells[0].text = "coulombic efficiency"
+            table.rows[0].cells[1].text = "库仑效率"
+            document.save(str(docx_path))
+        except Exception as e:  # noqa: BLE001 — 环境缺依赖则跳过
+            self.skipTest(f"无法构造 docx：{e}")
+        store = knowledge.KnowledgeStore(self.index_dir)
+        stats = store.refresh([str(self.docs)])
+        self.assertGreaterEqual(stats["files"], 1)
+        hits = store.search("库仑效率", dirs=[str(self.docs)])
+        self.assertTrue(hits)
+
     def test_refresh_search_and_stats(self):
         self._write("battery.md",
                     "# SEI\n\nThe solid electrolyte interphase (SEI) grows on the anode.\n\n"

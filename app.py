@@ -332,9 +332,18 @@ class App(QObject):
         self.llm = llm.LlmClient(cfg, self)
         self.monitor = Monitor(cfg)
         self.icon = IconWindow(cfg)
-        self.kb = knowledge.KnowledgeStore(DATA_DIR / "kb_index")
+        self.kb = knowledge.KnowledgeStore(DATA_DIR / "kb_index", exclude=[
+            CONFIG_PATH,          # 含云端/检索密钥，绝不索引（防随提示词外发）
+            DATA_DIR / "kb_index",
+            DATA_DIR / "glossaries",  # 术语表本来就按命中注入，索引它只会重复
+            DATA_DIR / "tm",
+            DATA_DIR / "app.log",
+            DATA_DIR / "ollama.log",
+        ])
         self.tmstore = tm.TmStore(DATA_DIR / "tm")
         self._kb_busy = False
+        self._kb_pending_dirs: list[str] | None = None  # 索引忙时暂存的最新目录集合
+        self._kb_pending_lock = threading.Lock()
         self._kb_dirs_signature: tuple[str, ...] = ()
         self.popup = PopupWindow(cfg)
         self.popup.input_requested.connect(self.on_input_translate)
@@ -717,19 +726,25 @@ class App(QObject):
         return "\n\n".join(part for part in parts if part)
 
     def on_tm_save(self, kind: str) -> None:
-        """弹窗「存为记忆」：编辑译文后写入当前领域的翻译记忆。"""
-        if self._sel is None:
+        """弹窗「存为记忆」：编辑译文后写入当前领域的翻译记忆。
+
+        - 只接受 translate/input（explain 页没有按钮，这里再校验一次防信号误接）；
+        - 原文与领域在打开对话框前快照固定：exec() 的嵌套事件循环期间可能
+          收到新取词结果，不能用保存时刻的 _sel 去配旧译文。
+        """
+        if kind not in ("translate", "input") or self._sel is None:
             return
         translation = self.popup.result_text(kind)
         if not translation.strip():
             x, y = cursor_physical()
             self.toast.show_at(x, y, "当前没有可保存的译文")
             return
-        dialog = TmEditDialog(self._sel.text, translation)
+        source = self._sel.text
+        did = domains.resolve_active(self._cfg)
+        dialog = TmEditDialog(source, translation)
         if dialog.exec() != TmEditDialog.Accepted:
             return
-        did = domains.resolve_active(self._cfg)
-        if self.tmstore.append(did, self._sel.text, dialog.translation()):
+        if self.tmstore.append(did, source, dialog.translation()):
             x, y = cursor_physical()
             self.toast.show_at(x, y, "已存入翻译记忆")
             log.info("翻译记忆已保存（domain=%s）", did or "general")
@@ -748,34 +763,50 @@ class App(QObject):
         signature = tuple(dirs)
         if not force and signature == self._kb_dirs_signature:
             return
-        if not dirs and not force:
-            self._kb_dirs_signature = signature
-            return
         self._kb_dirs_signature = signature
+        if not dirs and not force:
+            return
         self._refresh_kb_async(dirs)
 
     def _refresh_kb_async(self, dirs: list[str]) -> None:
-        if self._kb_busy or not dirs:
+        """后台刷新索引；已有任务在跑时把最新目录集合暂存，任务结束后补跑，
+        保证索引忙期间发生的目录变更不会丢失。"""
+        if self._kb_busy:
+            with self._kb_pending_lock:
+                self._kb_pending_dirs = dirs
             return
         self._kb_busy = True
 
         def run() -> None:
             try:
-                stats = self.kb.refresh(dirs)
-                log.info("知识库索引完成：%s", stats)
-            except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
-                log.exception("知识库索引刷新失败")
+                current = dirs
+                while current is not None:
+                    try:
+                        stats = self.kb.refresh(current)
+                        log.info("知识库索引完成：%s", stats)
+                    except Exception:  # noqa: BLE001 — 索引失败不影响翻译主流程
+                        log.exception("知识库索引刷新失败")
+                        break
+                    # 取走补跑意图（GUI 线程可能在上一轮期间写入了新目录）
+                    with self._kb_pending_lock:
+                        current, self._kb_pending_dirs = self._kb_pending_dirs, None
             finally:
                 self._kb_busy = False
 
         threading.Thread(target=run, name="kb-refresh", daemon=True).start()
 
-    def on_kb_rebuild(self) -> None:
-        """设置页「重建索引」：强制后台重建并回写状态。"""
+    def on_kb_rebuild(self, dirs: list | None = None) -> None:
+        """设置页「重建索引」：后台重建并回写状态。
+
+        dirs 来自设置页的工作副本（可能尚未保存），直接用它刷新——索引只是
+        缓存，提前索引未保存目录没有副作用。
+        """
         if self._kb_busy:
-            self.settings.set_kb_status("索引进行中，请稍候…")
+            with self._kb_pending_lock:
+                self._kb_pending_dirs = list(dirs or [])
+            self.settings.set_kb_status("索引进行中，新请求已排队…")
             return
-        dirs = self._kb_dirs_all()
+        dirs = list(dirs) if dirs else self._kb_dirs_all()
         if not dirs:
             self.settings.set_kb_status("请先为领域添加知识库目录并启用")
             return

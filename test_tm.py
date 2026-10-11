@@ -25,10 +25,30 @@ class TmStoreTests(unittest.TestCase):
         self.assertEqual(self.store.count("battery"), 0)
         self.assertEqual(self.store.count(""), 1)  # 其他领域不受影响
 
-    def test_path_for_rejects_unsafe_ids(self):
-        self.assertEqual(self.store.path_for("battery").name, "battery.jsonl")
+    def test_path_for_rejects_unsafe_ids_and_isolates_general(self):
+        self.assertEqual(self.store.path_for("battery").name, "dom_battery.jsonl")
         self.assertEqual(self.store.path_for("").name, "general.jsonl")
         self.assertEqual(self.store.path_for("../evil").name, "general.jsonl")
+        # id "general" 不得占用通用模式的命名空间；大小写不同不落同一文件
+        self.assertEqual(self.store.path_for("general").name, "dom_general.jsonl")
+        self.assertEqual(self.store.path_for("Battery").name,
+                         self.store.path_for("battery").name)
+
+    def test_corrupted_records_and_encoding_do_not_break_reads(self):
+        path = self.store.path_for("battery")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '{"src": "正常", "tgt": "normal"}\n'
+            '{"src": 123, "tgt": "数字原文应被跳过"}\n'
+            '{"src": "无译文"}\n'
+            "不是 JSON 的一行\n"
+            '{"src": "ok", "tgt": "好"}\n',
+            encoding="utf-8")
+        self.assertEqual(self.store.count("battery"), 2)
+        # 二进制垃圾（解码失败）也不抛异常
+        path.write_bytes(b"\xff\xfe\x00garbage")
+        self.assertEqual(self.store.count("battery"), 0)
+        self.assertEqual(self.store.example_context("battery", "anything"), "")
 
     def test_similarity(self):
         self.assertGreater(tm.similarity("SEI 膜生长机制", "SEI 膜生长"), 0.5)

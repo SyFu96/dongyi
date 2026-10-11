@@ -65,10 +65,43 @@ class GlossaryTests(unittest.TestCase):
                          ["solid electrolyte interphase", "intercalation"])
         self.assertEqual(domains.match_terms("无关文本", glossary), [])
 
+    def test_match_respects_ascii_word_boundaries(self):
+        glossary = [
+            ("formation", "化成", ""),
+            ("intercalation", "嵌入", ""),
+            ("deintercalation", "脱嵌", ""),
+            ("SEI", "固体电解质界面", ""),
+            ("state of charge", "荷电状态", ""),
+        ]
+        # formation 不得命中 information
+        self.assertEqual(domains.match_terms("Please see the information page.", glossary), [])
+        # intercalation 不得命中 deintercalation，反之要命中
+        hits = domains.match_terms("lithium deintercalation process", glossary)
+        self.assertEqual([h[0] for h in hits], ["deintercalation"])
+        hits = domains.match_terms("lithium intercalation process", glossary)
+        self.assertEqual([h[0] for h in hits], ["intercalation"])
+        # 缩写后接中文（词边界由 ASCII 字母数字界定，中文不算边界字符）
+        hits = domains.match_terms("SEI膜的生长", glossary)
+        self.assertEqual([h[0] for h in hits], ["SEI"])
+        # 多词术语容忍换行与连续空白
+        hits = domains.match_terms("the state\nof   charge is low", glossary)
+        self.assertEqual([h[0] for h in hits], ["state of charge"])
+
     def test_match_limit(self):
         glossary = [(f"t{i}", f"译{i}", "") for i in range(80)]
         hits = domains.match_terms(" ".join(f"t{i}" for i in range(80)), glossary)
         self.assertEqual(len(hits), domains.MAX_TERMS_INJECTED)
+
+    def test_long_fields_truncated_and_budgeted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "g.csv"
+            write_csv(path, "a," + "超" * 500 + "\n")
+            entries = domains.load_glossary(path)
+            self.assertEqual(len(entries[0][1]), domains.MAX_FIELD_CHARS)
+        # 注入总预算
+        matches = [(f"term{i}", "译" * 100, "") for i in range(50)]
+        text = domains.format_glossary(matches, budget=1000)
+        self.assertLessEqual(len(text), 1000 + 100)
 
     def test_format_glossary(self):
         text = domains.format_glossary([

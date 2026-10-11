@@ -22,7 +22,8 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=binaries,
-    datas=datas + [("assets/huayi.ico", "assets"), ("glossaries", "glossaries")],
+    datas=datas + [("assets/huayi.ico", "assets"),
+                   ("glossaries/battery.csv", "glossaries")],  # 只带内置表，个人术语表不入包
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

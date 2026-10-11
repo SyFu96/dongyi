@@ -526,10 +526,11 @@ class PopupWindow(QWidget):
         copy_btn = QPushButton("复制内容")
         copy_btn.clicked.connect(lambda _=False, k=kind: self._copy_page(k))
         brow.addWidget(copy_btn)
-        tm_btn = QPushButton("存为记忆")
-        tm_btn.setToolTip("修正译文后存入翻译记忆；以后翻译相似句子会自动作为参考。")
-        tm_btn.clicked.connect(lambda _=False, k=kind: self.tm_save_requested.emit(k))
-        brow.addWidget(tm_btn)
+        if kind == "translate":  # 解释不是译文，存进记忆会污染参考译例
+            tm_btn = QPushButton("存为记忆")
+            tm_btn.setToolTip("修正译文后存入翻译记忆；以后翻译相似句子会自动作为参考。")
+            tm_btn.clicked.connect(lambda _=False, k=kind: self.tm_save_requested.emit(k))
+            brow.addWidget(tm_btn)
         brow.addStretch(1)
         v.addLayout(brow)
         return page
