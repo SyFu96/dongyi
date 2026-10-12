@@ -250,7 +250,8 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertEqual(knowledge._join_identity("c:\\users\\x", "f.txt"),
                          os.path.normcase("c:\\users\\x\\f.txt"))
         # 与 _identity 的口径一致（同一文件两条路径身份相等）
-        real = Path(tempfile.mkdtemp()) / "root_file.json"
+        # 复用类夹具的临时目录（自动清理），不另开 mkdtemp 遗留目录
+        real = self.docs / "root_file.json"
         real.write_text("x", encoding="utf-8")
         self.assertEqual(knowledge._join_identity(knowledge._identity(real.parent),
                                                   real.name),

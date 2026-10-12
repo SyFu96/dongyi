@@ -54,6 +54,7 @@ class DomainIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        self._gates: list[threading.Event] = []  # 测试内创建的 gate，tearDown 统一放行
         self.base = Path(self.tmp.name)
         (self.base / "glossaries").mkdir()
         (self.base / "glossaries" / "battery.csv").write_text(
@@ -76,6 +77,11 @@ class DomainIntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         c = self.controller
+        for gate in getattr(self, "_gates", []):
+            gate.set()  # 断言失败也放行：工作线程最多再等 gate.wait 上限
+        deadline = time.time() + 8
+        while c._kb_busy and time.time() < deadline:
+            QTest.qWait(10)  # 销毁测试对象前等索引工作循环退出
         c._startup_retry.stop()
         c._keepalive.stop()
         c._debounce.stop()
@@ -259,6 +265,7 @@ class DomainIntegrationTests(unittest.TestCase):
         (docs2 / "b.txt").write_text("second corpus text", encoding="utf-8")
         calls: list[list[str]] = []
         gate = threading.Event()
+        self._gates.append(gate)
         real_refresh = c.kb.refresh
 
         def slow_refresh(dirs):
@@ -302,6 +309,7 @@ class DomainIntegrationTests(unittest.TestCase):
         (docs2 / "b.txt").write_text("second corpus text", encoding="utf-8")
         calls: list[list[str]] = []
         gate = threading.Event()
+        self._gates.append(gate)
         real_refresh = c.kb.refresh
 
         def flaky_refresh(dirs):
@@ -350,6 +358,7 @@ class DomainIntegrationTests(unittest.TestCase):
         (docs_b / "b.txt").write_text("beta corpus text", encoding="utf-8")
         calls: list[list[str]] = []
         gate = threading.Event()
+        self._gates.append(gate)
         real_refresh = c.kb.refresh
 
         def slow_refresh(dirs):
