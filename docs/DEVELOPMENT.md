@@ -14,7 +14,7 @@ uv run python app.py    # 启动（日志写 app.log）
 | 文件 | 职责 |
 |---|---|
 | `app.py` | 入口与主编排：加载配置 → 探测/预热 → 监听 → Qt 循环；`_compose_system` 统一组装领域提示词 |
-| `capture.py` | 取词：UIA 读选中文本 + 热键路径的剪贴板兜底 |
+| `capture.py` | 取词：UIA 读选中文本 + 受控的剪贴板兜底（拖选按白名单自动、热键始终可用） |
 | `trigger.py` | 划词/双击检测、全局热键、浮标窗 |
 | `llm.py` | 双后端流式客户端（本地 Ollama / OpenAI 兼容云端），按标签路由 |
 | `search.py` | 联网检索客户端（Ollama 托管 `web_search`，可中断） |

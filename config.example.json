@@ -23,6 +23,8 @@
   "max_text_len": 3000,
   "debounce_ms": 150,
   "icon_timeout_s": 3,
+  "clipboard_fallback": true,
+  "clipboard_fallback_processes": ["sioyek.exe"],
   "hotkeys": {
     "translate": "<ctrl>+<alt>+<shift>+t",
     "explain": "<ctrl>+<alt>+<shift>+e",

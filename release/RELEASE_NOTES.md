@@ -1,24 +1,32 @@
 ## 下载与运行
 
-Windows x64 用户下载 `dongyi-v0.1.0-windows-x64.zip`，**完整解压**后双击 `dongyi.exe`（无需安装 Python）。
+Windows x64 用户下载 `dongyi-v0.1.1-windows-x64.zip`，**完整解压**（`dongyi.exe` 与 `_internal` 必须在一起）后双击 `dongyi.exe`（无需安装 Python）。
 
 - 本地翻译需自行安装 [Ollama](https://ollama.com/) 并下载模型；云端翻译需在「设置…」里配置自己的 OpenAI 兼容 API。
 - 配置与日志保存在 `%APPDATA%\dongyi\`。
-- 本版本为**首次公开测试版（Alpha）**。
+- 本版本为**公开测试版（Alpha）**，也是**首个以新名称「懂译 / dongyi」发布的功能完整版**（v0.1.0 及更早版本名为「划译 / huayi」，不含领域适配）。
+
+## 本版新内容（v0.1.1）
+
+- **改名与完整功能包**：从 huayi 更名为懂译（dongyi），首次流出包含领域适配全部功能的分发包。
+- **界面刷新 + 双主题**：新设计的弹窗 / 浮标 / 设置 / 托盘外观，深色与浅色主题，可跟随系统切换。
+- **领域 / 术语 / 知识库 / 翻译记忆**：学科切换、强制术语表（CSV 热更新）、个人知识库（PDF、DOCX、Markdown、TXT 的本地检索）、翻译记忆。
+- **受限的拖选剪贴板兜底（默认 sioyek）**：拖选取词基于 UI Automation，自绘界面应用（如部分阅读器）里取不到选区时，对**白名单进程**（默认仅 sioyek，需在设置中把总开关与白名单按需调整）自动按文本读取一次选区并恢复你的剪贴板原状；剪贴板为图片/文件/富格式时自动跳过，不会覆盖原内容，此时热键可用。**不承诺任意应用必出浮标**；拖选可靠性以各应用 UIA 支持为准。
+- **取词正确性与安全修复**：请求过期/前台切换不再向无关窗口发键；备份还原带完整序号校验；硬链接/符号链接的排除文件别名不会进入个人知识库索引。
 
 ## 主要功能
 
 - 划词浮标 → 弹窗「译文 / 解释 / 追问 / 输入翻译」四个标签
 - 本地 Ollama 与任意 OpenAI 兼容云端，支持按标签混合；可一键「严格离线」
-- 解释/追问可联网检索；图形化设置窗口
+- 解释/追问可联网检索；图形化设置窗口（主题、学科、术语表、知识库、启动项）
 
 ## 许可与对应源码
 
 懂译采用 **GPL-3.0-only**；第三方组件遵循各自许可，完整许可与版权声明见包内
 `LICENSE`、`LICENSES/` 与 `THIRD_PARTY_NOTICES.md`。
 
-- 本次二进制对应 tag：`v0.1.0`，commit：`<COMMIT>`
-- 项目源码：<https://github.com/SyFu96/dongyi/archive/refs/tags/v0.1.0.zip>（另附 `dongyi-v0.1.0-source.zip`）
+- 本次二进制对应 tag：`v0.1.1`，commit：`<COMMIT>`
+- 项目源码：<https://github.com/SyFu96/dongyi/archive/refs/tags/v0.1.1.zip>（另附 `dongyi-v0.1.1-source.zip`）
 - 依赖对应源码、版本、修改情况：`release/SOURCE_CODE.md`
 - 重建与替换 LGPL 组件：`release/BUILDING.md`
 
@@ -28,4 +36,5 @@ Windows x64 用户下载 `dongyi-v0.1.0-windows-x64.zip`，**完整解压**后�
 
 下载 `SHA256SUMS.txt` 核对附件。
 
-> Ollama 与模型权重不随包分发；管理员权限窗口取词、剪贴板富格式还原存在已知限制。
+> Ollama 与模型权重不随包分发；管理员权限窗口取词、剪贴板富格式还原（热键路径只
+> 还原其中的纯文本）存在已知限制。

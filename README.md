@@ -25,9 +25,7 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 
 </div>
 
-> 当前发布包 v0.1.0 为改名前的历史版本，尚不包含领域适配；体验下文的新功能请先[从源码运行](#从源码运行)。
-
-在支持取词的应用中选中文字，点击选区旁的「译」，即可查看译文；还可以解释术语、继续追问。
+> 发布包 `dongyi-v0.1.1` 为**首个以「懂译」发布的功能完整版**；此前 `huayi-v0.1.0` 为改名前的历史包，不含领域适配。在支持取词的应用中选中文字，点击选区旁的「译」即可查看译文，还可解释术语、继续追问。
 
 > 使用云端模型时，当前文本会发送给对应服务商；云端追问还会携带原文、已有译文或解释及最近对话。
 > 联网检索默认向 Ollama 搜索服务发送**解释的原文或本轮问题**。需要离线使用时，请按
@@ -36,6 +34,7 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 ## 功能
 
 - **划词翻译**：选中文字后点击「译」，在弹窗中查看结果。
+- **热键取词**：`Ctrl+Alt+Shift+T / E / I` 在不拖选时取当前选中文字或呼出输入翻译。
 - **解释与追问**：解释当前文本，并围绕它继续提问。
 - **输入翻译**：自己输入文本，选择目标语种翻译。
 - **本地模型**：可连接本机 [Ollama](https://ollama.com/)；离线使用条件见[配置说明](docs/CONFIG.md)。
@@ -45,6 +44,15 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 - **强制术语表**：命中的术语按指定译法翻译；CSV 修改后热更新，无需重启。
 - **个人知识库（RAG）**：检索个人文献与笔记，支持 PDF、DOCX、Markdown、TXT 等；默认用于解释，可开启翻译检索。
 - **翻译记忆**：点击「存为记忆」，校对后保存句对；以后翻译相似句子时自动作为参考。
+- **双主题界面**：深色 / 浅色，可跟随系统切换；新设计的弹窗、设置与托盘外观。
+
+## 取词方式与限制
+
+拖选取词基于 UI Automation，在多数现代应用（浏览器、Office、编辑器等）可用；
+少数自绘界面应用读不到选区。对明确支持的阅读器（默认 **sioyek**），拖选取不到时
+可选择开启受控的剪贴板兜底：自动恢复你的剪贴板原状，且在剪贴板里是图片、文件、
+带格式内容时**自动跳过**（不会覆盖原内容），此时用热键取词始终可用。是否启用、
+把哪些阅读器加入白名单，见[配置说明](docs/CONFIG.md)。不承诺所有应用都出现浮标。
 
 领域设置、术语表与个人知识积累详见 [领域适配指南](docs/DOMAINS.md)。
 
@@ -62,11 +70,19 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 |---|---|---|
 | ![SEI 术语解释](docs/screenshots/ui-refresh/dark-explain.png) | ![多轮问答界面](docs/screenshots/ui-refresh/dark-chat.png) | ![输入翻译界面](docs/screenshots/ui-refresh/dark-input.png) |
 
+<div align="center">
+
+![浅色主题下的划词翻译](docs/screenshots/ui-refresh/light-translate.png)
+
+浅色主题 · 同一界面的跟随系统外观
+
+</div>
+
 ## 快速开始
 
 ### 直接下载（推荐）
 
-到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载 Windows x64 压缩包，**完整解压**后运行其中的 exe。当前发布包为历史版本 `huayi-v0.1.0-windows-x64.zip`，启动文件为 `huayi.exe`，尚不包含学科切换、术语表、个人知识库与翻译记忆；这些功能请先[从源码运行](#从源码运行)。打包版无需安装 Python；当前为公开测试版。
+到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载 `dongyi-v0.1.1-windows-x64.zip`，**完整解压**（`dongyi.exe` 与 `_internal` 目录必须在一起）后运行 `dongyi.exe`。打包版无需安装 Python；当前为公开测试版。
 
 - 本地翻译：先装 [Ollama](https://ollama.com/)，再拉一个模型：
 

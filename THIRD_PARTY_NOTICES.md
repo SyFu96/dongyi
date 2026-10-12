@@ -12,6 +12,11 @@
 | pynput | LGPL-3.0 | 同上（LGPLv3 义务）；纯 Python 模块，采用源码重组路径 |
 | pywin32 | PSF（上游含混合许可组件） | 按上游各组件的许可文件处理 |
 | uiautomation | Apache-2.0 | 保留版权与许可声明 |
+| pypdf | BSD-3-Clause | 保留版权与许可声明（`LICENSES/pypdf/`） |
+| python-docx | MIT | 保留版权与许可声明（`LICENSES/python-docx/`） |
+| lxml | BSD-3-Clause（捆绑 libxml2/libxslt 等） | 保留随包声明（`LICENSES/lxml/`） |
+| typing-extensions | PSF-2.0 | 保留版权与许可声明（`LICENSES/typing-extensions/`） |
+| PyInstaller 引导程序 | PyInstaller 许可（GPL 兼容特殊条款） | bootloader 随二进制分发；保留其许可声明与上游源码链接 |
 | comtypes | MIT | 保留版权与许可声明 |
 | six | MIT | 保留版权与许可声明 |
 | packaging | Apache-2.0 / BSD | 保留版权与许可声明 |

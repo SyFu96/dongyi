@@ -33,6 +33,8 @@
 | `blacklist_processes` | 进程名黑名单（如游戏、IDE） |
 | `theme` | `dark` / `light` / `system`（跟随系统）；设置 → 外观选择后立即预览，保存记住选择，取消恢复原主题 |
 | `icon_timeout_s` | 浮标无操作自动隐藏秒数（默认 3） |
+| `clipboard_fallback` | 拖选（划词）路径 UIA 取词失败后的自动剪贴板兜底总开关，默认 `true`。热键路径不在此开关限制内（始终可用兜底） |
+| `clipboard_fallback_processes` | 自动兜底允许发键的阅读器进程白名单，默认 `["sioyek.exe"]`。白名单外的应用划选仍走 UIA 或热键；终端窗口与 `blacklist_processes` 永不自动发键 |
 | `popup.width` / `popup.height` | 弹窗初始尺寸（默认 460×420，最小 420×420） |
 | `show_startup_window` | 默认 `false`，启动时不弹页面 |
 | `auto_start_ollama` | 默认 `true`，本机默认地址的服务未启动时尝试后台启动 |
@@ -69,6 +71,27 @@
 "provider": "openai",
 "kind_providers": { "translate": "ollama", "input": "ollama", "explain": "openai", "chat": "openai" }
 ```
+
+## 划词兜底（拖选路径的剪贴板取词）
+
+sioyek 等自绘阅读器不支持 UIA TextPattern，拖选取词拿不到选区：此时若该
+进程在 `clipboard_fallback_processes` 白名单且 `clipboard_fallback` 开启，
+会自动模拟一次 Ctrl+C 读取选区，然后把你的剪贴板恢复原状（含空剪贴板）。
+
+- 自动兜底前会核对请求时效与前台窗口身份：连拖多次、拖动窗口/滚动条
+  （前台已切换）时直接放弃，不会向无关窗口发键。
+- 只在剪贴板当前为空或纯文本（含系统合成格式）时操作：原图/文件/富格式
+  内容直接跳过，只留热键路径可用。
+- 其他阅读器想启用：把进程名加进白名单即可，例如：
+
+```json
+"clipboard_fallback": true,
+"clipboard_fallback_processes": ["sioyek.exe", "sumatrapdf.exe"]
+```
+
+- 热键路径不受白名单限制（用户显式触发）；热键兜底对含纯文本的剪贴板
+  会还原备份文本，但富格式（带排版的 Excel/Word 单元格）只还原其中的
+  纯文本部分——这是显式操作下保留旧行为的已知取舍。
 
 ## 联网检索
 

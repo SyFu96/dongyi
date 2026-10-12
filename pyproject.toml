@@ -1,6 +1,6 @@
 [project]
 name = "dongyi"
-version = "0.1.0"
+version = "0.1.1"
 description = "Windows 桌面划词翻译工具：学科适配、术语表、个人知识库与翻译记忆；本地 Ollama 与云端混合（PySide6）"
 readme = "README.md"
 license = "GPL-3.0-only"
