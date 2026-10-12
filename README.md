@@ -6,12 +6,20 @@
 
 **Windows 划词翻译工具，支持本地和云端模型；学科切换、强制术语表、个人知识库与翻译记忆，让它越用越懂你的专业领域。**
 
+Domain-aware text-selection translation for Windows, powered by local Ollama or OpenAI-compatible APIs, with enforced glossaries, personal knowledge retrieval (RAG), and translation memory.
+
+[![CI](https://github.com/SyFu96/dongyi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SyFu96/dongyi/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/SyFu96/dongyi)](https://github.com/SyFu96/dongyi/releases/latest)
 ![License](https://img.shields.io/badge/license-GPL--3.0--only-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4)
 ![Python](https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white)
 ![LLM](https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20compatible-000)
 
+[下载 Windows 版](https://github.com/SyFu96/dongyi/releases/latest) · [快速开始](#快速开始) · [领域适配](docs/DOMAINS.md) · [反馈问题](https://github.com/SyFu96/dongyi/issues)
+
 </div>
+
+> 当前发布包 v0.1.0 为改名前的历史版本，尚不包含领域适配；体验下文的新功能请先[从源码运行](#从源码运行)。
 
 在支持取词的应用中选中文字，点击选区旁的「译」，即可查看译文；还可以解释术语、继续追问。
 
@@ -52,7 +60,7 @@
 
 ### 直接下载（推荐）
 
-到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载最新 windows-x64 压缩包（改名前发布的历史包可能仍以 `huayi-` 开头，内容相同），**完整解压**后双击其中的 `dongyi.exe`（旧包为 `huayi.exe`）。打包版无需安装 Python；当前为公开测试版。
+到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载 Windows x64 压缩包，**完整解压**后运行其中的 exe。当前发布包为历史版本 `huayi-v0.1.0-windows-x64.zip`，启动文件为 `huayi.exe`，尚不包含学科切换、术语表、个人知识库与翻译记忆；这些功能请先[从源码运行](#从源码运行)。打包版无需安装 Python；当前为公开测试版。
 
 - 本地翻译：先装 [Ollama](https://ollama.com/)，再拉一个模型：
 
