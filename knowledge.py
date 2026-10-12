@@ -276,7 +276,7 @@ class KnowledgeStore:
     防止用户把项目目录设为知识库后密钥被索引并外发）。".git" 目录始终排除。
     """
 
-    VERSION = 3  # v3：chunk 带身份字段（normcase(realpath)）；旧版索引废弃重建
+    VERSION = 4  # v4：硬链接/文件symlink别名按 (st_dev, st_ino) 拒绝；v3 索引可能已把排除文件的别名内容收进缓存，废弃重建
 
     def __init__(self, index_dir: Path, exclude: "list[str | Path] | None" = None) -> None:
         self._dir = index_dir
@@ -361,8 +361,18 @@ class KnowledgeStore:
         统计（分词/df/avgdl）在本方法内随新索引一次性原子换入——发布即可检索，
         GUI 线程永远不会撞上"统计未建好"的窗口。
         """
-        # 排除规则按身份（realpath 展开短名/链接）比较，一次刷新只解析一次
+        # 排除规则按身份（realpath 展开短名/链接）比较，一次刷新只解析一次。
+        # 另收集已存在的排除目标的 (st_dev, st_ino)：硬链接/文件 symlink
+        # 别名的路径身份与排除目标不同（_identity 按路径解析），仅路径
+        # 比较防不住；inode 身份相同，扫描 stat 时一并拒绝。
         rule_prefixes = [(_identity(r), _dir_prefix(r)) for r in self._exclude_paths]
+        excluded_inodes: set[tuple[int, int]] = set()
+        for r in self._exclude_paths:
+            try:
+                st = Path(r).stat()
+            except OSError:
+                continue  # 规则目标不存在：保留路径匹配作占位
+            excluded_inodes.add((st.st_dev, st.st_ino))
         wanted: dict[str, tuple[tuple[float, int], str]] = {}  # 身份 → (时间戳, 原始拼写)
         dir_ids: dict[str, str] = {}  # 目录拼写 → 目录身份缓存：realpath 每目录只做一次
         for d in dirs:
@@ -379,13 +389,18 @@ class KnowledgeStore:
                 if parent_id is None:
                     parent_id = dir_ids[str(path.parent)] = _identity(path.parent)
                 # 文件身份 = 目录身份 + 文件名：目录别名（短名/链接）防得住，
-                # 又不必对每个文件做 realpath（杀软实时扫描下代价高）
+                # 又不必对每个文件做 realpath（杀软实时扫描下代价高）；
+                # 文件本身的硬链接/文件symlink别名由下方 inode 检查兜住
                 path_id = _join_identity(parent_id, path.name)
                 if self._excluded(path_id, rule_prefixes):
                     continue
                 try:
                     stat = path.stat()
                 except OSError:
+                    continue
+                # stat 跟随链接：排除目标的硬链接/文件 symlink 别名在此拒绝，
+                # 不额外解析路径（普通文献扫描仍是每文件一次 stat）
+                if (stat.st_dev, stat.st_ino) in excluded_inodes:
                     continue
                 if stat.st_size > MAX_FILE_BYTES:
                     continue

@@ -131,6 +131,11 @@ DEFAULTS = {
     "max_text_len": 3000,
     "debounce_ms": 150,
     "icon_timeout_s": 3,
+    # 拖选路径 UIA 取词失败后的自动剪贴板兜底：总开关 + 受支持阅读器进程
+    # 白名单（发 Ctrl+C 有误发风险，只对已验证的阅读器放开；热键路径不受
+    # 此限制，始终可用）。默认白名单只放行为实测可用的 sioyek。
+    "clipboard_fallback": True,
+    "clipboard_fallback_processes": ["sioyek.exe"],
     "hotkeys": {
         "translate": "<ctrl>+<alt>+<shift>+t",
         "explain": "<ctrl>+<alt>+<shift>+e",
@@ -904,7 +909,8 @@ class App(QObject):
     def _inside_own_ui(self, phys: tuple[int, int]) -> bool:
         lx, ly, _ = logical_from_physical(*phys)
         return any(window.isVisible() and window.frameGeometry().contains(int(lx), int(ly))
-                   for window in (self.popup, self.status, self.icon, self.toast))
+                   for window in (self.popup, self.status, self.icon, self.toast,
+                                  self.settings))
 
     # —— 触发路径
 

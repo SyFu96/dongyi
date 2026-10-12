@@ -92,6 +92,40 @@ class ThemeTests(unittest.TestCase):
         self.assertIsNone(c._theme_preview)
         self.assertEqual(self.qt.styleSheet(), app_theme_qss("dark"))
 
+    def test_minimize_keeps_theme_preview_alive(self):
+        # 回归：最小化设置窗也会触发 hide 事件（spontaneous），但它不是取消——
+        # 恢复窗口后预览必须仍生效，否则下拉显示"浅色"而界面已回深色
+        c = self.controller
+        c.settings.show()
+        c.settings.theme_combo.setCurrentIndex(c.settings.theme_combo.findData("light"))
+        self.assertEqual(self.qt.styleSheet(), app_theme_qss("light"))
+        c.settings.showMinimized()
+        self.qt.processEvents()
+        c.settings.showNormal()
+        self.qt.processEvents()
+        self.assertEqual(self.qt.styleSheet(), app_theme_qss("light"),
+                         "最小化误撤销了主题预览")
+        self.assertEqual(c.settings.theme_combo.currentData(), "light")
+        c.settings.hide()  # 真正隐藏才撤销预览
+        self.assertEqual(self.qt.styleSheet(), app_theme_qss("dark"))
+
+    def test_minimized_then_close_or_cancel_revokes_preview(self):
+        # Qt hideEvent 口径：主动 hide()/close() 是非 spontaneous 事件——
+        # 处于最小化状态时也一样会撤销预览（isMinimized 判断拦不住这组）
+        c = self.controller
+        combo = c.settings.theme_combo
+        for action in ("hide", "close"):
+            c.settings.show()
+            combo.setCurrentIndex(combo.findData("dark"))  # 复位：确保切换必发信号
+            combo.setCurrentIndex(combo.findData("light"))
+            self.assertEqual(self.qt.styleSheet(), app_theme_qss("light"))
+            c.settings.showMinimized()
+            self.qt.processEvents()
+            getattr(c.settings, action)()  # 取消按钮=hide；标题栏关闭=close
+            self.qt.processEvents()
+            self.assertEqual(self.qt.styleSheet(), app_theme_qss("dark"),
+                             f"最小化状态下的主动 {action} 未撤销主题预览")
+
     def test_system_preview_follows_signals_before_save(self):
         c = self.controller
         c.settings.show()

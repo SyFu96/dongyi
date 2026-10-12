@@ -413,6 +413,11 @@ class SettingsFormRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.qt = QApplication.instance() or QApplication([])
+        # reload() 会触发本地模型刷新线程：不需要网络的表单回归统一 mock，
+        # 不依赖本机 Ollama、不向 stderr 泄露线程异常
+        patcher = patch.object(dongyi.SettingsWindow, "_refresh_local_models")
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
 
     def _make_cfg(self):
         cfg = deepcopy(dongyi.DEFAULTS)

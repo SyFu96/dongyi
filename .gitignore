@@ -6,6 +6,7 @@ __pycache__/
 # 本地配置与日志（含密钥，勿入库）
 config.json
 *.log
+@AutomationLog.txt   # uiautomation 库的调试输出文件
 
 # 用户个人数据（源码运行时写在仓库目录内）
 tm/

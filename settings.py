@@ -142,6 +142,24 @@ class SettingsWindow(QWidget):
         mv.addWidget(self.chk_offline)
         v.addWidget(mode_box)
 
+        fallback_box = QGroupBox("划词兜底")
+        fv = QVBoxLayout(fallback_box)
+        self.chk_clip_fallback = QCheckBox(
+            "拖选取词失败时，对白名单阅读器自动用剪贴板兜底（模拟 Ctrl+C）")
+        fv.addWidget(self.chk_clip_fallback)
+        proc_row = QHBoxLayout()
+        proc_row.addWidget(QLabel("白名单进程（逗号分隔）"))
+        self.clip_processes = QLineEdit()
+        proc_row.addWidget(self.clip_processes, 1)
+        fv.addLayout(proc_row)
+        fallback_hint = QLabel(
+            "默认 sioyek.exe。白名单外的应用划选仍走 UIA 或热键；终端类窗口"
+            "与黑名单进程不会自动发键。开启后改动保存即生效。")
+        fallback_hint.setObjectName("statusLabel")
+        fallback_hint.setWordWrap(True)
+        fv.addWidget(fallback_hint)
+        v.addWidget(fallback_box)
+
         self.local_box = QGroupBox("本地大模型（Ollama）")
         lf = QFormLayout(self.local_box)
         self.local_url = QLineEdit()
@@ -320,6 +338,9 @@ class SettingsWindow(QWidget):
         self.rb_cloud.setChecked(mode == MODE_CLOUD)
         self.rb_hybrid.setChecked(mode == MODE_HYBRID)
         self.chk_offline.setChecked(bool(c.get("offline")))
+        self.chk_clip_fallback.setChecked(bool(c.get("clipboard_fallback", True)))
+        self.clip_processes.setText(
+            ", ".join(str(n) for n in (c.get("clipboard_fallback_processes") or [])))
 
         self.local_url.setText(c.get("base_url") or DEFAULT_LOCAL_URL)
         self.local_model.setCurrentText(c.get("model") or "")
@@ -345,8 +366,13 @@ class SettingsWindow(QWidget):
         return MODE_LOCAL
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        # 取消、标题栏关闭和直接隐藏都撤销预览；保存流程已先更新共享配置。
-        self.theme_preview_requested.emit(None)
+        # Qt QWidget.hideEvent 文档：窗口管理器产生的隐藏（最小化、被遮挡）
+        # 是 spontaneous 事件；代码调用 hide()/close()/取消按钮是普通事件。
+        # 只在后一种撤销预览：最小化不是取消——恢复窗口后预览应继续生效；
+        # 而"最小化状态下主动 hide/关闭/取消"仍必须撤销（isMinimized 判
+        # 别不了这一点）。
+        if not event.spontaneous():
+            self.theme_preview_requested.emit(None)
         super().hideEvent(event)
 
     def _on_save(self) -> None:
@@ -361,6 +387,12 @@ class SettingsWindow(QWidget):
         else:
             c["provider"], c["kind_providers"] = "openai", dict(HYBRID_KINDS)
         c["base_url"] = self.local_url.text().strip() or DEFAULT_LOCAL_URL
+        c["clipboard_fallback"] = bool(self.chk_clip_fallback.isChecked())
+        c["clipboard_fallback_processes"] = [
+            p.strip().lower()
+            for p in self.clip_processes.text().replace(";", ",").replace("；", ",").split(",")
+            if p.strip()
+        ]
         c["model"] = self.local_model.currentText().strip()
         cloud = c.setdefault("cloud", {})
         cloud["base_url"] = self.cloud_url.text().strip()
@@ -606,13 +638,13 @@ class SettingsWindow(QWidget):
     def _refresh_local_models(self) -> None:
         base = self.local_url.text().strip().rstrip("/") or DEFAULT_LOCAL_URL
         if self._cfg.get("offline") and not is_loopback(urllib.parse.urlparse(base).hostname or ""):
-            self.models_loaded.emit([])  # 离线：不向非本机地址查询
+            self._safe_emit(self.models_loaded, [])  # 离线：不向非本机地址查询
             return
         url = base + "/api/tags"
 
         def run() -> None:
             if self._cfg.get("offline") and not is_loopback(urllib.parse.urlparse(base).hostname or ""):
-                self.models_loaded.emit([])  # 排队期间开启离线：发送前再检查
+                self._safe_emit(self.models_loaded, [])  # 排队期间开启离线：发送前再检查
                 return
             names: list[str] = []
             try:
@@ -621,7 +653,7 @@ class SettingsWindow(QWidget):
                 names = [m.get("name") for m in (data.get("models") or []) if m.get("name")]
             except Exception:  # noqa: BLE001 — 取不到就不填充，保留手输
                 log.debug("拉取本地模型列表失败", exc_info=True)
-            self.models_loaded.emit(names)
+            self._safe_emit(self.models_loaded, names)
 
         threading.Thread(target=run, name="ollama-models", daemon=True).start()
 
@@ -647,7 +679,7 @@ class SettingsWindow(QWidget):
 
         def run() -> None:
             if self._cfg.get("offline"):  # 排队期间开启离线：发送前再检查
-                self.test_result.emit(False, "离线模式已开启，禁止云端连接测试")
+                self._safe_emit(self.test_result, False, "离线模式已开启，禁止云端连接测试")
                 return
             ok, msg = False, ""
             try:
@@ -668,9 +700,21 @@ class SettingsWindow(QWidget):
                 ok, msg = False, f"HTTP {e.code}（检查地址 / 模型 / Key）"
             except Exception as e:  # noqa: BLE001
                 ok, msg = False, f"失败：{e}"
-            self.test_result.emit(ok, msg)
+            self._safe_emit(self.test_result, ok, msg)
 
         threading.Thread(target=run, name="cloud-test", daemon=True).start()
+
+    def _safe_emit(self, signal, *args) -> None:
+        """后台线程向本窗口发信号：窗口可能已被销毁（deleteLater/关闭）。
+
+        emit 时 C++ 对象已析构会抛 RuntimeError("Signal source has been
+        deleted")——窗口都没了，回填无意义，安静吞掉，避免未处理线程异常
+        打到 stderr。
+        """
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            log.debug("设置窗口已销毁，忽略后台结果回写")
 
     def _show_test_result(self, ok: bool, msg: str) -> None:
         self.btn_test.setEnabled(True)

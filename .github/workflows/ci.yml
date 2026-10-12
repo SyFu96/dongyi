@@ -20,4 +20,4 @@ jobs:
         run: uv sync --locked
 
       - name: Run unit tests
-        run: uv run python -m unittest test_startup test_features test_interaction test_domains test_knowledge test_tm test_domain_integration test_theme test_settings_launch
+        run: uv run python -m unittest test_startup test_features test_interaction test_domains test_knowledge test_tm test_domain_integration test_theme test_settings_launch test_capture_worker

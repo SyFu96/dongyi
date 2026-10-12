@@ -213,6 +213,40 @@ class KnowledgeStoreTests(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn("磷酸铁锂", hits[0]["text"])
 
+    def test_hardlink_and_symlink_alias_cannot_bypass_exclusion(self):
+        # 发布阻断回归（审核方实际复现）：文件身份=父目录realpath+文件名，
+        # 被排除文件 os.link 出的硬链接别名路径身份不同 → 旧版会把同一
+        # inode 的敏感内容收进索引。文件 symlink 同理（stat 跟随链接）。
+        secret = self._write("config.json", "FAKESECRET battery glossary")
+        self._write("keep.txt", "alpha corpus text")
+        skip_note = "硬链接不可用，仅测 symlink"
+        try:
+            os.link(secret, self.docs / "notes.txt")
+            hardlinked = True
+        except OSError as e:  # noqa: BLE001 — 非 NTFS/权限不足则只测符号链接
+            skip_note = f"硬链接不可用（{e}），仅测 symlink"
+            hardlinked = False
+
+        try:  # 文件 symlink：本机可能无符号链接创建权限，失败则跳过该别名
+            os.symlink(secret, self.docs / "link.md")
+            symlinked = True
+        except (OSError, NotImplementedError):
+            symlinked = False
+
+        if not hardlinked and not symlinked:
+            self.skipTest("本机既无硬链接也无符号链接权限，别名场景无法构造" + skip_note)
+
+        store = knowledge.KnowledgeStore(self.index_dir, exclude=[secret])
+        stats = store.refresh([str(self.docs)])
+        self.assertEqual(store.search("FAKESECRET"), [], "硬链接/symlink 别名绕过排除")
+        self.assertEqual(stats["files"], 1, f"别名文件不应计入索引{skip_note}")
+        self.assertTrue(store.search("alpha", dirs=[str(self.docs)]))
+        # 同 inode 证据（复现脚本口径）：别名确为同一文件，而非巧合同名
+        if hardlinked:
+            alias_stat = (self.docs / "notes.txt").stat()
+            self.assertEqual((secret.stat().st_dev, secret.stat().st_ino),
+                             (alias_stat.st_dev, alias_stat.st_ino))
+
     def test_alias_paths_cannot_bypass_exclusion_or_split_index(self):
         # Major 复审回归：短名/链接别名访问同一目录时——
         # ① 排除规则仍生效（config.json 不得借别名进索引）；
