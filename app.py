@@ -62,6 +62,7 @@ from popup import (
 )
 from trigger import Monitor, IconWindow
 from settings import SettingsWindow
+from theme import resolve_theme
 
 APP_DIR = Path(__file__).resolve().parent
 def _writable_data_dir() -> Path:
@@ -152,7 +153,7 @@ DEFAULTS = {
     "tm_enabled": True,   # 翻译记忆：翻译时参考已确认的相似句对
     "blacklist_processes": [],
     "theme": "dark",
-    "popup": {"width": 460, "height": 320},
+    "popup": {"width": 460, "height": 420},
 }
 
 # 内置示例领域（首次运行/旧配置升级时种入，可直接改删）
@@ -318,6 +319,7 @@ class App(QObject):
     def __init__(self, cfg: dict) -> None:
         super().__init__()
         self._cfg = cfg
+        self._theme_preview: str | None = None
         self._paused = False
         self._sel: capture.Selection | None = None
         self._icon_sel: capture.Selection | None = None
@@ -368,6 +370,7 @@ class App(QObject):
         self.status.quit_requested.connect(self.quit)
         self.settings = SettingsWindow(cfg, DATA_DIR, self.kb, self.tmstore)
         self.settings.saved.connect(self.on_settings_saved)
+        self.settings.theme_preview_requested.connect(self._preview_theme)
         self.settings.rebuild_requested.connect(self.on_kb_rebuild)
         self.kb_bridge.status.connect(self.settings.set_kb_status)
         self.tray = TrayIcon(actions={
@@ -412,11 +415,12 @@ class App(QObject):
         self.llm.finished.connect(self.on_finished)
         self.llm.failed.connect(self.on_failed)
         self.llm.warmup_finished.connect(self.on_warmup_finished)
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self._on_system_theme_changed)
 
     # —— 启动 / 退出
 
     def start(self) -> None:
-        QApplication.instance().setStyleSheet(app_theme_qss(self._cfg["theme"]))
+        self._apply_theme()
         self.tray.show()
         self.worker.start()
         self.monitor.start()
@@ -424,6 +428,23 @@ class App(QObject):
         if self._cfg.get("show_startup_window", False):
             self.status.show_status()
         QTimer.singleShot(0, self._startup)
+
+    def _apply_theme(self, scheme=None) -> None:
+        theme = resolve_theme(self._theme_preview or self._cfg.get("theme", "dark"), scheme)
+        QApplication.instance().setStyleSheet(app_theme_qss(theme))
+        self.popup.set_theme(theme)
+        self.icon.set_theme(theme)
+        self.toast.set_theme(theme)
+        self.tray.setIcon(TrayIcon._make_icon(theme))
+
+    def _on_system_theme_changed(self, scheme) -> None:
+        if (self._theme_preview or self._cfg.get("theme")) == "system":
+            self._apply_theme(scheme)
+
+    def _preview_theme(self, preference) -> None:
+        if self._theme_preview != preference:
+            self._theme_preview = preference
+            self._apply_theme()
 
     def _needs_local(self) -> bool:
         """只要有一个标签走本地（或严格离线），就需要本地 Ollama 就绪。"""
@@ -552,7 +573,9 @@ class App(QObject):
             log.exception("打开设置窗口失败")
 
     def on_settings_saved(self) -> None:
+        self._theme_preview = None
         save_config(self._cfg)
+        self._apply_theme()
         self._cancel_web()  # 策略可能变化：作废在途检索
         if self._cfg.get("offline"):
             self.llm.cancel("translate", "explain", "chat", "input")  # 立即中断可能的外发

@@ -31,9 +31,9 @@
 | `active_domain` | 当前激活领域 id；空 = 通用模式。弹窗/托盘切换后自动写回 |
 | `tm_enabled` | 翻译记忆总开关，默认 `true` |
 | `blacklist_processes` | 进程名黑名单（如游戏、IDE） |
-| `theme` | `dark` / `light` |
+| `theme` | `dark` / `light` / `system`（跟随系统）；设置 → 外观选择后立即预览，保存记住选择，取消恢复原主题 |
 | `icon_timeout_s` | 浮标无操作自动隐藏秒数（默认 3） |
-| `popup.width` / `popup.height` | 弹窗尺寸 |
+| `popup.width` / `popup.height` | 弹窗初始尺寸（默认 460×420，最小 420×420） |
 | `show_startup_window` | 默认 `false`，启动时不弹页面 |
 | `auto_start_ollama` | 默认 `true`，本机默认地址的服务未启动时尝试后台启动 |
 

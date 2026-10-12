@@ -23,6 +23,7 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas + [("assets/dongyi.ico", "assets"),
+                   ("assets/chevron.png", "assets"),
                    ("glossaries/battery.csv", "glossaries")],  # 只带内置表，个人术语表不入包
     hiddenimports=hiddenimports,
     hookspath=[],

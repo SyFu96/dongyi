@@ -43,6 +43,8 @@ from PySide6.QtWidgets import (
 import domains
 from llm import is_loopback
 from netutil import open_no_redirect
+from popup import show_active_window
+from theme import set_feedback
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +66,7 @@ class _NoWheelCombo(QComboBox):
 
 class SettingsWindow(QWidget):
     saved = Signal()
+    theme_preview_requested = Signal(object)  # str = 预览；None = 恢复已保存主题。
     models_loaded = Signal(list)
     test_result = Signal(bool, str)
     # 「重建索引」携带工作副本中的知识库目录（可能尚未保存），由 App 后台执行并回写状态
@@ -79,10 +82,11 @@ class SettingsWindow(QWidget):
         self._domains: dict = {}
         self._loading_form = False  # 表单载入期间阻断控件信号回写工作副本
         self.setWindowTitle("懂译 — 设置")
+        self.setObjectName("settingsRoot")
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)  # 置顶，避免被划词弹窗挡住
         # 初始高度不超过屏幕可用高度的 90%：内容区可滚动，小屏也能完整操作
         avail = QGuiApplication.primaryScreen().availableGeometry()
-        self.resize(640, min(880, int(avail.height() * 0.9)))
+        self.resize(680, min(880, int(avail.height() * 0.9)))
         self.setMinimumWidth(520)
         self.models_loaded.connect(self._populate_local)
         self.test_result.connect(self._show_test_result)
@@ -102,9 +106,30 @@ class SettingsWindow(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget()
+        body.setObjectName("settingsBody")
         v = QVBoxLayout(body)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(10)
+        v.setContentsMargins(24, 22, 24, 22)
+        v.setSpacing(18)
+        title = QLabel("设置")
+        title.setObjectName("brandTitle")
+        v.addWidget(title)
+        subtitle = QLabel("连接你的模型，构建你的专业知识。")
+        subtitle.setObjectName("statusLabel")
+        v.addWidget(subtitle)
+
+        appearance_box = QGroupBox("外观")
+        appearance_form = QFormLayout(appearance_box)
+        self.theme_combo = _NoWheelCombo()
+        for label, value in (("深色", "dark"), ("浅色", "light"), ("跟随系统", "system")):
+            self.theme_combo.addItem(label, value)
+        self.theme_combo.currentIndexChanged.connect(
+            lambda _index: self.theme_preview_requested.emit(self.theme_combo.currentData()))
+        appearance_form.addRow("界面主题", self.theme_combo)
+        appearance_hint = QLabel("选择后立即预览，保存记住选择；取消或关闭会恢复原主题。")
+        appearance_hint.setObjectName("statusLabel")
+        appearance_hint.setWordWrap(True)
+        appearance_form.addRow(appearance_hint)
+        v.addWidget(appearance_box)
 
         mode_box = QGroupBox("使用方式")
         mv = QVBoxLayout(mode_box)
@@ -171,12 +196,14 @@ class SettingsWindow(QWidget):
         outer.addWidget(scroll, 1)
 
         btns = QHBoxLayout()
-        btns.setContentsMargins(14, 8, 14, 10)
+        btns.setContentsMargins(24, 14, 24, 16)
         btns.addStretch(1)
         cancel = QPushButton("取消")
         cancel.clicked.connect(self.hide)
         btns.addWidget(cancel)
         save = QPushButton("保存")
+        save.setObjectName("primaryBtn")
+        save.setMinimumWidth(88)
         save.clicked.connect(self._on_save)
         btns.addWidget(save)
         outer.addLayout(btns)
@@ -272,13 +299,16 @@ class SettingsWindow(QWidget):
 
     def open_window(self) -> None:
         self.reload()
-        self.show()
-        self.setWindowState((self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
-        self.raise_()
-        self.activateWindow()
+        show_active_window(self)
+        log.info("打开设置窗口（%s×%s）", self.width(), self.height())
 
     def reload(self) -> None:
         c = self._cfg
+        theme_index = self.theme_combo.findData(c.get("theme", "dark"))
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.setCurrentIndex(max(0, theme_index))
+        self.theme_combo.blockSignals(False)
+        self.theme_preview_requested.emit(None)
         kp = c.get("kind_providers") or {}
         if kp.get("explain") == "openai":
             mode = MODE_HYBRID
@@ -314,8 +344,14 @@ class SettingsWindow(QWidget):
             return MODE_HYBRID
         return MODE_LOCAL
 
+    def hideEvent(self, event) -> None:  # noqa: N802
+        # 取消、标题栏关闭和直接隐藏都撤销预览；保存流程已先更新共享配置。
+        self.theme_preview_requested.emit(None)
+        super().hideEvent(event)
+
     def _on_save(self) -> None:
         c = self._cfg
+        c["theme"] = self.theme_combo.currentData() or "dark"
         c["offline"] = bool(self.chk_offline.isChecked())
         mode = self._mode()
         if mode == MODE_LOCAL:
@@ -603,7 +639,7 @@ class SettingsWindow(QWidget):
             self._show_test_result(False, "离线模式已开启，禁止云端连接测试")
             return
         self.lbl_test.setText("测试中…")
-        self.lbl_test.setStyleSheet("")
+        set_feedback(self.lbl_test, "")
         self.btn_test.setEnabled(False)
         base = self.cloud_url.text().strip().rstrip("/")
         model = self.cloud_model.text().strip()
@@ -639,4 +675,4 @@ class SettingsWindow(QWidget):
     def _show_test_result(self, ok: bool, msg: str) -> None:
         self.btn_test.setEnabled(True)
         self.lbl_test.setText(msg)
-        self.lbl_test.setStyleSheet("color:#8ecbf5;" if ok else "color:#ff8a80;")
+        set_feedback(self.lbl_test, "success" if ok else "error")

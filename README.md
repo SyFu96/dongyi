@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/dongyi-logo.png" width="96" alt="懂译 logo">
+
 # 懂译 · dongyi
 
 **越来越懂你的翻译。**
@@ -16,6 +18,10 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 ![LLM](https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20compatible-000)
 
 [下载 Windows 版](https://github.com/SyFu96/dongyi/releases/latest) · [快速开始](#快速开始) · [领域适配](docs/DOMAINS.md) · [反馈问题](https://github.com/SyFu96/dongyi/issues)
+
+<img src="docs/screenshots/demo.gif" alt="懂译演示：划选英文 → 强制术语翻译 → 学科解释" width="760">
+
+*10 秒演示：划选 Battery pack → 学科「电池/能源」强制术语译文 → 一键解释。*
 
 </div>
 
@@ -46,15 +52,15 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 
 <div align="center">
 
-![学科为电池/能源时的划词翻译](docs/screenshots/translate-domain.png)
+![学科为电池/能源时的划词翻译](docs/screenshots/ui-refresh/dark-translate.png)
 
-学科=电池/能源下的强制术语翻译
+深色科技风 · 电池 / 能源学科（示例数据）
 
 </div>
 
 | 术语解释 | 多轮追问 | 输入翻译 |
 |---|---|---|
-| ![SEI 术语解释](docs/screenshots/explain-domain.png) | ![多轮问答界面](docs/screenshots/chat.png) | ![输入翻译界面](docs/screenshots/input.png) |
+| ![SEI 术语解释](docs/screenshots/ui-refresh/dark-explain.png) | ![多轮问答界面](docs/screenshots/ui-refresh/dark-chat.png) | ![输入翻译界面](docs/screenshots/ui-refresh/dark-input.png) |
 
 ## 快速开始
 

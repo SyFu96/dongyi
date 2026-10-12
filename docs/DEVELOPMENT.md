@@ -25,16 +25,19 @@ uv run python app.py    # 启动（日志写 app.log）
 | `conversation.py` | 追问上下文组装（含领域上下文注入） |
 | `popup.py` | 弹窗（译文/解释/追问/输入翻译 四标签）、托盘、浮标、Toast、记忆编辑对话框 |
 | `settings.py` | 图形化设置窗口（模型/联网/领域与知识库管理） |
+| `theme.py` | 深浅主题的配色与控件样式 |
 | `instance.py` | 单实例（命名互斥量 + 本地套接字） |
 | `startup.py` | 开机自启动快捷方式（源码用 `launch.vbs`，exe 指向自身） |
 
 数据文件（与 `config.json` 同目录）：`glossaries/<领域id>.csv` 术语表、`kb_index/` 知识库索引、`tm/<领域id>.jsonl` 翻译记忆。
 
+界面预览：`uv run python tools/preview_ui.py` 使用示例数据生成深浅主题的四标签与设置页 PNG，写入 `docs/screenshots/ui-refresh/`；不读取个人配置或连接模型。
+
 ## 测试
 
 ```powershell
 # 启动、置顶、追问、取消请求与领域适配的自动回归（CI 也跑这七组）
-uv run python -m unittest test_startup test_features test_interaction test_domains test_knowledge test_tm test_domain_integration -v
+uv run python -m unittest test_startup test_features test_interaction test_domains test_knowledge test_tm test_domain_integration test_theme test_settings_launch -v
 
 # LLM 链路：流式翻译 + 解释，打印首字延迟/总耗时
 uv run python test_llm.py
@@ -48,6 +51,8 @@ uv run python test_live.py
 # 真实静默启动/自启动入口/重复启动
 uv run python test_silent_launch.py
 ```
+
+`test_settings_launch` 使用原生 Windows 子进程模拟 `SW_HIDE` 启动，检查设置/状态窗首次打开、隐藏后重开和最小化后恢复时的实际可见性。
 
 CI（GitHub Actions）在 `windows-latest` 上以 `QT_QPA_PLATFORM=offscreen` 跑 `test_startup test_features test_interaction`。
 
