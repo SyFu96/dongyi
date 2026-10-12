@@ -191,7 +191,9 @@ def load_config() -> dict:
     cfg = DEFAULTS.copy()
     if CONFIG_PATH.exists():
         try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            # utf-8-sig 同时接受带/不带 BOM 的合法 JSON：记事本等常写 BOM，
+            # 解析失败回退默认后，用户后续保存/托盘切换会覆盖真实配置
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
                 cfg = _deep_merge(DEFAULTS, data)
                 # 旧配置升级：种入示例领域；用户显式写过 "domains"（哪怕空对象）则尊重现状

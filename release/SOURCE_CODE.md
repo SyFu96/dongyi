@@ -28,7 +28,7 @@
 | packaging | 26.3 | Apache-2.0 / BSD | `https://github.com/pypa/packaging` |
 | setuptools | 84.0.0 | MIT（含内嵌组件） | `https://github.com/pypa/setuptools` |
 | Python 运行时 | 3.14.6 | PSF | `https://www.python.org/downloads/release/python-3146/` |
-| PyInstaller 运行时引导 | 6.22.3 | GPL 兼容特殊条款（bootloader） | `https://github.com/pyinstaller/pyinstaller`（tag `v6.22.3`） |
+| PyInstaller 运行时引导 | 6.22.3 | GPL-2.0+ / bootloader 嵌入例外（`LICENSES/pyinstaller/COPYING.txt`） | `https://github.com/pyinstaller/pyinstaller`（tag `v6.22.3`，`bootloader/` 源码） |
 | OpenSSL（Qt 附带） | 见包内 | Apache-2.0 | `https://www.openssl.org/source/` |
 
 > 精确的 sdist/commit 以 `uv.lock` 与上表为准。**PySide6 源码包不能代替 Qt 本体源码**；Qt 若走仓库下载方式需包含必要子模块。

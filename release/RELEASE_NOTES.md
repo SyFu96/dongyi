@@ -8,7 +8,7 @@ Windows x64 用户下载 `dongyi-v0.1.1-windows-x64.zip`，**完整解压**（`d
 
 ## 本版新内容（v0.1.1）
 
-- **改名与完整功能包**：从 huayi 更名为懂译（dongyi），首次流出包含领域适配全部功能的分发包。
+- **改名与完整功能包**：从 huayi 更名为懂译（dongyi），首次发布包含领域适配全部功能的分发包。
 - **界面刷新 + 双主题**：新设计的弹窗 / 浮标 / 设置 / 托盘外观，深色与浅色主题，可跟随系统切换。
 - **领域 / 术语 / 知识库 / 翻译记忆**：学科切换、强制术语表（CSV 热更新）、个人知识库（PDF、DOCX、Markdown、TXT 的本地检索）、翻译记忆。
 - **受限的拖选剪贴板兜底（默认 sioyek）**：拖选取词基于 UI Automation，自绘界面应用（如部分阅读器）里取不到选区时，对**白名单进程**（默认仅 sioyek，需在设置中把总开关与白名单按需调整）自动按文本读取一次选区并恢复你的剪贴板原状；剪贴板为图片/文件/富格式时自动跳过，不会覆盖原内容，此时热键可用。**不承诺任意应用必出浮标**；拖选可靠性以各应用 UIA 支持为准。
@@ -25,7 +25,7 @@ Windows x64 用户下载 `dongyi-v0.1.1-windows-x64.zip`，**完整解压**（`d
 懂译采用 **GPL-3.0-only**；第三方组件遵循各自许可，完整许可与版权声明见包内
 `LICENSE`、`LICENSES/` 与 `THIRD_PARTY_NOTICES.md`。
 
-- 本次二进制对应 tag：`v0.1.1`，commit：`<COMMIT>`
+- 本次二进制对应 tag：`v0.1.1`（实际 commit 于发布 body 附加）
 - 项目源码：<https://github.com/SyFu96/dongyi/archive/refs/tags/v0.1.1.zip>（另附 `dongyi-v0.1.1-source.zip`）
 - 依赖对应源码、版本、修改情况：`release/SOURCE_CODE.md`
 - 重建与替换 LGPL 组件：`release/BUILDING.md`

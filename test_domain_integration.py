@@ -44,6 +44,22 @@ class ConfigSeedTests(unittest.TestCase):
             self.assertTrue(cfg_path.exists())
             self.assertIn("battery", cfg["domains"])
 
+    def test_bom_config_is_loaded_not_discarded(self):
+        # 冒烟暴露：Windows 记事本常给 JSON 加 UTF-8 BOM。旧实现按纯 utf-8
+        # 读取会解析失败回退默认，用户后续保存/托盘切换就覆盖真实配置。
+        # 修复口径：utf-8-sig 读取，BOM 配置完整生效。
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            raw = ('{"model": "qwen3-vl:8b-instruct", "offline": true,'
+                   '"domains": {"mine": {"name": "我的领域"}}}')
+            cfg_path.write_bytes(b"\xef\xbb\xbf" + raw.encode("utf-8"))  # 带 BOM
+            with patch.object(dongyi, "CONFIG_PATH", cfg_path):
+                cfg = dongyi.load_config()
+            self.assertEqual(cfg["model"], "qwen3-vl:8b-instruct")
+            self.assertTrue(cfg["offline"])
+            self.assertIn("mine", cfg["domains"])  # 显式领域不被电池示例覆盖
+            self.assertNotIn("battery", cfg["domains"])
+
 
 class DomainIntegrationTests(unittest.TestCase):
     @classmethod

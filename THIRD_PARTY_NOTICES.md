@@ -16,7 +16,7 @@
 | python-docx | MIT | 保留版权与许可声明（`LICENSES/python-docx/`） |
 | lxml | BSD-3-Clause（捆绑 libxml2/libxslt 等） | 保留随包声明（`LICENSES/lxml/`） |
 | typing-extensions | PSF-2.0 | 保留版权与许可声明（`LICENSES/typing-extensions/`） |
-| PyInstaller 引导程序 | PyInstaller 许可（GPL 兼容特殊条款） | bootloader 随二进制分发；保留其许可声明与上游源码链接 |
+| PyInstaller 引导程序 | PyInstaller 许可（GPL-2.0+ 及 bootloader 嵌入例外） | bootloader 随二进制分发；保留随包 `LICENSES/pyinstaller/COPYING.txt`（官方全文，含 bootloader 例外与捆绑组件条款） |
 | comtypes | MIT | 保留版权与许可声明 |
 | six | MIT | 保留版权与许可声明 |
 | packaging | Apache-2.0 / BSD | 保留版权与许可声明 |
