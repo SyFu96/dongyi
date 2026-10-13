@@ -19,9 +19,24 @@ Domain-aware text-selection translation for Windows, powered by local Ollama or 
 
 [下载 Windows 版](https://github.com/SyFu96/dongyi/releases/latest) · [快速开始](#快速开始) · [领域适配](docs/DOMAINS.md) · [反馈问题](https://github.com/SyFu96/dongyi/issues)
 
-<img src="docs/screenshots/demo.gif" alt="懂译演示：划选英文 → 强制术语翻译 → 学科解释" width="760">
+---
 
-*10 秒演示：划选 Battery pack → 学科「电池/能源」强制术语译文 → 一键解释。*
+### 🚀 Rust / Tauri 重制版已发布
+
+单文件、更小更快：主程序 **6.7 MiB**、安装包 **2.4 MiB**、冷启动到就绪 **~0.7 s**、稳态内存 **~33 MB**；
+UI 按 ArtCraft Launcher 风全新重做（纸白底 + 细线栅格 + 编号色块）。**数据目录与 Python 版互通**——
+`%APPDATA%\dongyi\` 的配置 / 术语表 / 翻译记忆 / 知识库索引两版可直接共用、交替使用。
+
+> 源码与说明：[`dongyi-rs/`](dongyi-rs/README.md) ·
+> 下载：[Releases · rust-v0.1.0](https://github.com/SyFu96/dongyi/releases/tag/rust-v0.1.0)
+
+<img src="dongyi-rs/docs/screenshots/ui-translate.png" width="430" alt="Rust 重制版界面（划词翻译）">
+
+---
+
+<img src="docs/screenshots/demo.gif" alt="懂译（Python 版）演示：划选英文 → 强制术语翻译 → 学科解释" width="760">
+
+*10 秒演示（Python 版界面）：划选 Battery pack → 学科「电池/能源」强制术语译文 → 一键解释。*
 
 </div>
 
