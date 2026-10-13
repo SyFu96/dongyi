@@ -12,11 +12,17 @@ Windows 划词翻译工具「懂译」的 Rust/Tauri 重写版：取词划词翻
 
 ## 界面
 
-弹窗（ArtCraft Launcher 风：纸白底 + 1px 细线栅格 + 全直角 + 编号色块 + 等宽 micro-label）：
+ArtCraft Launcher 风：纸白底 + 1px 细线栅格 + 全直角 + 编号色块 + 等宽 micro-label。
 
-<img src="docs/screenshots/ui-main.png" alt="懂译弹窗界面" width="760">
+| 译文（划词后自动翻译） | 解释（学科适配 + 术语） |
+|---|---|
+| ![译文](docs/screenshots/ui-translate.png) | ![解释](docs/screenshots/ui-explain.png) |
 
-（其余界面截图/演示见后续补充；设置窗为左导航 + 表单卡片的独立窗口。）
+| 输入翻译（本地/联网 + 目标语向 + 存记忆校对） | 追问（结合原文的对话） |
+|---|---|
+| ![输入翻译](docs/screenshots/ui-input.png) | ![追问](docs/screenshots/ui-chat.png) |
+
+设置窗为独立无边框窗口（左导航六组：模型 / 划词 / 热键 / 检索 / 外观 / 领域）。
 
 ## 安装与运行
 

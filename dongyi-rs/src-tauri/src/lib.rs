@@ -134,18 +134,70 @@ fn hide_popup(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 打开设置窗（P5 修复）：
-/// - 保持同步函数：托盘菜单从 Rust 内部直接调用，async 函数不 await 不会执行
-/// - 去掉 center()（实测卡死主线程）；每次显示前强制恢复创建尺寸（曾变 131x36 炁态）
+/// 创建设置窗（setup 与 show_settings 自愈重建共用）。
+/// P6 修复：拦截关闭请求（Alt+F4 等）→ 只隐藏不销毁；窗口丢失时可重建。
+fn build_settings_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let win = WebviewWindowBuilder::new(
+        app,
+        SETTINGS_LABEL,
+        tauri::WebviewUrl::App("index.html#view=settings".into()),
+    )
+    .title("懂译 · 设置")
+    .inner_size(820.0, 620.0)
+    .decorations(false)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    let win_ev = win.clone();
+    let _ = win.on_window_event(move |e| {
+        if let WindowEvent::CloseRequested { api, .. } = e {
+            api.prevent_close();
+            let _ = win_ev.hide();
+        }
+    });
+    Ok(win)
+}
+
+/// 打开设置窗（P6 修复 2）：
+/// - 保持同步函数（托盘菜单从 Rust 内部直接调用，async 不 await 不会执行）
+/// - **窗口丢失自愈**：极端情况下窗口被销毁 → 重建后再显示（与 close→hide 双保险）
+/// - 显式按主屏工作区中心设置物理位置与尺寸（避免 131x36 怪态/屏外不可见）
 #[tauri::command]
 fn show_settings(app: AppHandle) -> Result<(), String> {
     eprintln!("[orch] show_settings called");
-    let win = app
-        .get_webview_window(SETTINGS_LABEL)
-        .ok_or("settings 窗口不存在")?;
-    let _ = win.set_size(tauri::LogicalSize::new(820.0, 620.0));
-    win.show().map_err(|e| e.to_string())?;
-    win.set_focus().map_err(|e| e.to_string())
+    let win = match app.get_webview_window(SETTINGS_LABEL) {
+        Some(w) => w,
+        None => {
+            eprintln!("[orch] settings 窗口缺失 → 重建");
+            build_settings_window(&app)?
+        }
+    };
+    // 目标几何：820x620 逻辑 → 按主屏缩放折算物理，并 clamp 进工作区（留 40px 边距）
+    if let Ok(Some(mon)) = win.primary_monitor() {
+        let scale = mon.scale_factor();
+        let ms = mon.size();
+        let mp = mon.position();
+        let w = ((820.0 * scale) as i32).min(ms.width as i32 - 80);
+        let h = ((620.0 * scale) as i32).min(ms.height as i32 - 80);
+        let x = mp.x + ((ms.width as i32 - w) / 2).max(0);
+        let y = mp.y + ((ms.height as i32 - h) / 2).max(0);
+        eprintln!(
+            "[orch] settings target phys=({w}x{h}) at ({x},{y}) scale={scale} mon={}x{}",
+            ms.width, ms.height
+        );
+        let rp = win.set_position(tauri::PhysicalPosition::new(x, y));
+        eprintln!("[orch] settings set_position ok={}", rp.is_ok());
+        let rs = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
+        eprintln!("[orch] settings set_size ok={}", rs.is_ok());
+    } else {
+        eprintln!("[orch] settings primary_monitor 不可用，按默认位置显示");
+    }
+    let r = win.show();
+    eprintln!("[orch] settings show ok={}", r.is_ok());
+    let f = win.set_focus();
+    eprintln!("[orch] settings focus ok={}", f.is_ok());
+    r.map_err(|e| e.to_string())?;
+    f.map_err(|e| e.to_string())
 }
 
 /// 设置窗关闭按钮（×）：隐藏而非销毁（配置仍留内存，下次秒开）。
@@ -290,26 +342,23 @@ pub fn run() {
             .min_inner_size(380.0, 300.0)
             .build()?;
             // 点外部隐藏：Blur 事件在不抢焦点窗口上不可靠，改由编排层的
-            // mouse-down 判定完成（坑 8 的 Rust 版处理），这里保留事件占位。
+            // mouse-down 判定完成（坑 8 的 Rust 版处理）。
+            // P6 修复：**拦截系统关闭请求（Alt+F4 等）→ 只隐藏不销毁**——
+            // 窗口一旦销毁，get_webview_window 永远拿不到，该窗口自此打不开
+            let popup_ev = popup.clone();
             let _ = popup.on_window_event(move |e| {
-                if let WindowEvent::Focused(false) = e {}
+                if let WindowEvent::CloseRequested { api, .. } = e {
+                    api.prevent_close();
+                    let _ = popup_ev.hide();
+                }
             });
 
             // 设置窗：ArtCraft 风（P4）：无边框 + 前端自绘标题栏（拖拽区），
-            // 可聚焦可输入；初始隐藏，托盘/隐私菜单呼出
-            WebviewWindowBuilder::new(
-                app,
-                SETTINGS_LABEL,
-                tauri::WebviewUrl::App("index.html#view=settings".into()),
-            )
-            .title("懂译 · 设置")
-            .inner_size(820.0, 620.0)
-            .decorations(false)
-            .visible(false)
-            .build()?;
+            // 可聚焦可输入；初始隐藏，托盘/隐私菜单呼出（close→隐藏见 build_settings_window）
+            build_settings_window(&handle)?;
 
             // 浮标：24px 无边框透明小窗，不抢焦点；取词成功才显示
-            WebviewWindowBuilder::new(
+            let icon = WebviewWindowBuilder::new(
                 app,
                 ICON_LABEL,
                 tauri::WebviewUrl::App("index.html#view=icon".into()),
@@ -326,6 +375,14 @@ pub fn run() {
             .visible(false)
             .resizable(false)
             .build()?;
+            // P6 修复：浮标同样拦截关闭请求 → 仅隐藏（防销毁后浮标永远不出现）
+            let icon_ev = icon.clone();
+            let _ = icon.on_window_event(move |e| {
+                if let WindowEvent::CloseRequested { api, .. } = e {
+                    api.prevent_close();
+                    let _ = icon_ev.hide();
+                }
+            });
 
             // 编排：钩子 + 捕获线程 + 防抖
             let cfg = handle.state::<SharedCfg>().lock().unwrap().clone();
