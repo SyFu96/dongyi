@@ -6,149 +6,135 @@
 
 **越来越懂你的翻译。**
 
-**Windows 划词翻译工具，支持本地和云端模型；学科切换、强制术语表、个人知识库与翻译记忆，让它越用越懂你的专业领域。**
+**Windows 划词翻译工具的 Rust / Tauri 重制版**：单文件、更小更快，
+取词划词翻译 / 解释 / 追问 / 输入翻译，本地 Ollama 与联网 OpenAI 兼容（DeepSeek 等）双后端，
+学科领域 + 术语表 + 翻译记忆 + 个人知识库（RAG）。
 
-Domain-aware text-selection translation for Windows, powered by local Ollama or OpenAI-compatible APIs, with enforced glossaries, personal knowledge retrieval (RAG), and translation memory.
-
-[![CI](https://github.com/SyFu96/dongyi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SyFu96/dongyi/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/SyFu96/dongyi)](https://github.com/SyFu96/dongyi/releases/latest)
+[![Release](https://img.shields.io/github/v/release/SyFu96/dongyi?filter=rust-*&label=rust%20release)](https://github.com/SyFu96/dongyi/releases/tag/rust-v0.1.0)
+[![ci-rust](https://github.com/SyFu96/dongyi/actions/workflows/ci-rust.yml/badge.svg?branch=main)](https://github.com/SyFu96/dongyi/actions/workflows/ci-rust.yml)
 ![License](https://img.shields.io/badge/license-GPL--3.0--only-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D4)
-![Python](https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)
 ![LLM](https://img.shields.io/badge/LLM-Ollama%20%7C%20OpenAI%20compatible-000)
 
-[下载 Windows 版](https://github.com/SyFu96/dongyi/releases/latest) · [快速开始](#快速开始) · [领域适配](docs/DOMAINS.md) · [反馈问题](https://github.com/SyFu96/dongyi/issues)
-
----
-
-### 🚀 Rust / Tauri 重制版已发布
-
-单文件、更小更快：主程序 **6.7 MiB**、安装包 **2.4 MiB**、冷启动到就绪 **~0.7 s**、稳态内存 **~33 MB**；
-UI 按 ArtCraft Launcher 风全新重做（纸白底 + 细线栅格 + 编号色块）。**数据目录与 Python 版互通**——
-`%APPDATA%\dongyi\` 的配置 / 术语表 / 翻译记忆 / 知识库索引两版可直接共用、交替使用。
-
-> 源码与说明：[`dongyi-rs/`](dongyi-rs/README.md) ·
-> 下载：[Releases · rust-v0.1.0](https://github.com/SyFu96/dongyi/releases/tag/rust-v0.1.0)
-
-<img src="dongyi-rs/docs/screenshots/ui-translate.png" width="430" alt="Rust 重制版界面（划词翻译）">
-
----
-
-<img src="docs/screenshots/demo.gif" alt="懂译（Python 版）演示：划选英文 → 强制术语翻译 → 学科解释" width="760">
-
-*10 秒演示（Python 版界面）：划选 Battery pack → 学科「电池/能源」强制术语译文 → 一键解释。*
+[下载安装包 / 绿色版](https://github.com/SyFu96/dongyi/releases/tag/rust-v0.1.0) · [Rust 源码与说明](dongyi-rs/README.md) · [数据与配置](#数据目录) · [反馈问题](https://github.com/SyFu96/dongyi/issues)
 
 </div>
 
-> 发布包 `dongyi-v0.1.1` 为**首个以「懂译」发布的功能完整版**；此前 `huayi-v0.1.0` 为改名前的历史包，不含领域适配。在支持取词的应用中选中文字，点击选区旁的「译」即可查看译文，还可解释术语、继续追问。
+> **本仓库包含两个版本**：
+> **`dongyi-rs/`（Rust / Tauri 重制版，主推，v0.1.0）** 与
+> **根目录（Python 原版，v0.1.x，说明见 [PYTHON_VERSION.md](PYTHON_VERSION.md)）**。
+> 两者共用 `%APPDATA%\dongyi\` 数据目录（配置 / 术语表 / 翻译记忆 / 知识库索引），可交替使用。
+>
+> 重制版收益（实测）：主程序 6.7 MiB、安装包 2.4 MiB；冷启动到就绪 ~0.7 s；稳态内存 ~33 MB；
+> 无 Python 运行时依赖，单一可执行文件。
 
-> 使用云端模型时，当前文本会发送给对应服务商；云端追问还会携带原文、已有译文或解释及最近对话。
-> 联网检索默认向 Ollama 搜索服务发送**解释的原文或本轮问题**。需要离线使用时，请按
-> [配置说明](docs/CONFIG.md)启用「严格离线」，并关闭 Ollama 云功能。
+## 界面
 
-## 功能
+ArtCraft Launcher 风：纸白底 + 1px 细线栅格 + 全直角 + 编号色块 + 等宽 micro-label。
 
-- **划词翻译**：选中文字后点击「译」，在弹窗中查看结果。
-- **热键取词**：`Ctrl+Alt+Shift+T / E / I` 在不拖选时取当前选中文字或呼出输入翻译。
-- **解释与追问**：解释当前文本，并围绕它继续提问。
-- **输入翻译**：自己输入文本，选择目标语种翻译。
-- **本地模型**：可连接本机 [Ollama](https://ollama.com/)；离线使用条件见[配置说明](docs/CONFIG.md)。
-- **云端模型**：可接入支持流式 Chat Completions 的 OpenAI 兼容服务（DeepSeek、Qwen、GLM、Kimi 等）。
-- **联网检索**：解释和追问可参考搜索结果；检索失败时使用模型自身知识。
-- **学科切换**：在弹窗或托盘切换学科，也可自建领域，下一次请求即生效。
-- **强制术语表**：命中的术语按指定译法翻译；CSV 修改后热更新，无需重启。
-- **个人知识库（RAG）**：检索个人文献与笔记，支持 PDF、DOCX、Markdown、TXT 等；默认用于解释，可开启翻译检索。
-- **翻译记忆**：点击「存为记忆」，校对后保存句对；以后翻译相似句子时自动作为参考。
-- **双主题界面**：深色 / 浅色，可跟随系统切换；新设计的弹窗、设置与托盘外观。
+| 译文（划词后自动翻译） | 解释（学科适配 + 术语） |
+|---|---|
+| ![译文](dongyi-rs/docs/screenshots/ui-translate.png) | ![解释](dongyi-rs/docs/screenshots/ui-explain.png) |
 
-## 取词方式与限制
+| 输入翻译（本地/联网 + 目标语向 + 存记忆校对） | 追问（结合原文的对话） |
+|---|---|
+| ![输入翻译](dongyi-rs/docs/screenshots/ui-input.png) | ![追问](dongyi-rs/docs/screenshots/ui-chat.png) |
 
-拖选取词基于 UI Automation，在多数现代应用（浏览器、Office、编辑器等）可用；
-少数自绘界面应用读不到选区。对明确支持的阅读器（默认 **sioyek**），拖选取不到时
-可选择开启受控的剪贴板兜底：自动恢复你的剪贴板原状，且在剪贴板里是图片、文件、
-带格式内容时**自动跳过**（不会覆盖原内容），此时用热键取词始终可用。是否启用、
-把哪些阅读器加入白名单，见[配置说明](docs/CONFIG.md)。不承诺所有应用都出现浮标。
+设置窗为独立无边框窗口（左导航六组：模型 / 划词 / 热键 / 检索 / 外观 / 领域）。
 
-领域设置、术语表与个人知识积累详见 [领域适配指南](docs/DOMAINS.md)。
+## 安装与运行
 
-## 界面预览
+- 安装包：`dongyi_0.1.0_x64-setup.exe`（NSIS，当前用户安装，免管理员）——[下载](https://github.com/SyFu96/dongyi/releases/tag/rust-v0.1.0)
+- 绿色版：`dongyi_0.1.0_x64-portable.zip`（解压后双击 `dongyi.exe`）
+- 常驻系统托盘；热键默认 `Ctrl+Alt+Shift+T/E/I`（翻译/解释/输入翻译）
+- 从源码构建：见 [`dongyi-rs/README.md`](dongyi-rs/README.md)（`cd dongyi-rs && npx tauri dev`）
 
-<div align="center">
+## 数据目录
 
-![学科为电池/能源时的划词翻译](docs/screenshots/ui-refresh/dark-translate.png)
+`%APPDATA%\dongyi\`（与 Python 原版共用，可直接接力）：
 
-深色科技风 · 电池 / 能源学科（示例数据）
+| 路径 | 内容 |
+|---|---|
+| `config.json` | 全部配置（模型、热键、学科领域、知识库目录、主题等） |
+| `app.log` | 运行日志（启动耗时、知识库刷新/告警、LLM 请求等；诊断入口） |
+| `glossaries\*.csv` | 术语表，每行 `原文,译文[,备注]`，`#` 开头为注释 |
+| `tm\general.jsonl`、`tm\dom_<学科>.jsonl` | 翻译记忆（`{"src","tgt","time"}` 每行一条） |
+| `kb_index\index.json` | 知识库 BM25 索引（v4 格式，与 Python 原版互通） |
 
-</div>
+## 功能要点
 
-| 术语解释 | 多轮追问 | 输入翻译 |
-|---|---|---|
-| ![SEI 术语解释](docs/screenshots/ui-refresh/dark-explain.png) | ![多轮问答界面](docs/screenshots/ui-refresh/dark-chat.png) | ![输入翻译界面](docs/screenshots/ui-refresh/dark-input.png) |
+- **划词**：UIA 取词 + 受控剪贴板兜底；防抖；浮标自动隐藏（防误触：取不到词不弹 UI）
+- **翻译/解释/追问/输入翻译**：流式输出、可停止、追问上下文、输入翻译支持目标语向
+- **双后端**：每个入口可切换本地 Ollama / 联网；联网 key 在设置页粘贴，留空回退环境变量
+- **学科适配**：领域说明 + 术语表（词边界感知）+ 知识库片段 + 翻译记忆参考译例，按请求组装注入
+- **翻译记忆**：「存记忆」支持**校对译文后保存**（请求配对，防新旧错配）
+- **知识库**：txt/md/markdown/csv/json 直读；后台线程增量索引（mtime+size 复用）；BM25 检索
+- **严格离线**：仅放行本机 Ollama（loopback），一律不外发云端
+- **设置**：模型 / 划词 / 热键 / 检索 / 外观（跟随系统主题）/ 领域 六组；差异路径事务保存，失败不动旧配置
 
-<div align="center">
+## 已知裁切与限制
 
-![浅色主题下的划词翻译](docs/screenshots/ui-refresh/light-translate.png)
+- 知识库解析仅 txt/md/markdown/csv/json（UTF-8，非 UTF-8 按容错字符处理，无 GB18030 解码）；PDF/DOCX **不解析**
+- PDF/DOCX 的既有缓存**保留条件**：该文件仍在已启用领域的 `kb_dirs` 扫描目录内、元数据可读、且不超过 20 MiB；
+  满足条件且索引里已有其片段时会继续消费；源文件被删除/移出目录/超过 20 MiB 时，刷新会移除其片段
+- 源文件变化但无法解析（PDF/DOCX）：本版**继续沿用旧缓存**（后台日志告警），旧内容不会自动失效
+- 知识库额度：可解析文件受 5 万块上限（被截断文件标记不完整，容量释放后下次刷新补齐）；
+  **不可解析类型的既有缓存全量保留、不受该上限约束**——总缓存量可能超出 5 万块
+- 知识库索引初始化：**后台异步加载**，未就绪期间检索静默返回空；异常/超时自动重试，连续失败后暂停并保留待刷新目标
+- 索引**磁盘保存失败**（权限/占用）：内存索引仍生效，**不自动重试**
+- 术语表按 `csv.reader` 常用子集解析（引号仅在字段起始生效、支持跨行字段、CR/LF/CRLF）
+- 弹窗开着时静默划词的浮标偶有不显示（已知限制；主流程用热键）
+- 热键改动需重启应用生效
 
-浅色主题 · 同一界面的跟随系统外观
+## 诊断与恢复（日志位置）
 
-</div>
+- **日志文件**：`%APPDATA%\dongyi\app.log`（含 `[boot]` 启动耗时、`[orch]` 编排、`[kb]` 知识库、`[llm]` 请求等）
+- **知识库未就绪/暂停**：日志出现 `[kb] 索引初始化未就绪，本次刷新跳过`、`[orch] kb 初始化长时间未就绪，暂停自动重试`
+  —— 非致命：翻译正常；稍后在设置保存一次或切换学科触发重试；持续失败检查目录权限/占用
+- **索引保存失败**：日志出现 `[kb] 索引临时文件写入失败` 或 `索引替换失败` —— 内存索引仍可用；
+  解除权限/占用后，在设置里**换到另一有效目录再切回**（或重启应用）触发真实重刷
+- 本版**没有用户可见的诊断弹窗**；上述状态只体现在 app.log 中（已知限制）
 
-## 快速开始
+## 已知限制（用户可见行为汇总）
 
-### 直接下载（推荐）
+| 现象 | 原因与建议 |
+|---|---|
+| 解释/追问里知识库内容暂时缺席 | 索引后台初始化中或正在重建；稍后重试；`app.log` 有告警可查 |
+| 知识库里的 PDF/DOCX 内容**完全不出现** | 该文件从未被索引过（无既有缓存）：本版不解析该格式；转成 txt/md 后加入 |
+| 知识库里的 PDF/DOCX 内容**与源文件最新版不一致** | 有旧缓存但源文件已更新：本版沿用旧片段（日志告警）；如需最新内容请转 txt/md |
+| 存记忆提示"请先完成一次翻译" | 采用请求配对（防新旧错配）：需本页完成过一次翻译后，才可将该次结果校对保存 |
+| 修改热键后不生效 | 热键在启动时注册，保存后重启应用 |
 
-到 [**Releases**](https://github.com/SyFu96/dongyi/releases) 下载 `dongyi-v0.1.1-windows-x64.zip`，**完整解压**（`dongyi.exe` 与 `_internal` 目录必须在一起）后运行 `dongyi.exe`。打包版无需安装 Python；当前为公开测试版。
-
-- 本地翻译：先装 [Ollama](https://ollama.com/)，再拉一个模型：
-
-  ```powershell
-  ollama pull qwen3-vl:8b-instruct          # 较小、较快
-  # 或 ollama pull qwen3-vl:30b-a3b-instruct # 30B 版本，模型文件约 20GB；效果与速度取决于文本和硬件
-  ```
-
-  然后在「设置…」里把模型名改成对应名称。
-
-- 云端翻译：托盘右键 →「设置…」，选「云端 API」，填地址 / 模型 / API Key。
-
-### 从源码运行
-
-需要 Windows、Git 和 [uv](https://docs.astral.sh/uv/)（自动管理 Python 3.13+）：
+## 开发构建
 
 ```powershell
-git clone https://github.com/SyFu96/dongyi.git
-cd dongyi
-uv sync
-uv run python app.py
+cd dongyi-rs
+# 依赖：Node + Rust(MSVC)；桌面调试（前端热更）
+npx tauri dev
+# 发布构建（内嵌前端 dist + NSIS 安装包）
+npx tauri build
+# 工作区测试
+cargo test --workspace
 ```
 
-## 怎么用
+> 构建铁律：`frontendDist` 在编译期内嵌进 exe——改前端后必须 `npm run build` **并重编 exe**，只重启不重编不会生效。
 
-| 操作 | 说明 |
-|---|---|
-| 拖选文字 / 双击选词 | 选区旁浮出「译」，点它出译文 |
-| `Ctrl+Alt+Shift+T` / `E` | 不拖选也能取当前选中文字，直接出「译文」/「解释」 |
-| `Ctrl+Alt+Shift+I` | 呼出「输入翻译」，自己打字翻译 |
-| 弹窗里的「解释」「追问」「输入翻译」 | 同一窗口里的另外三个标签 |
-| 弹窗「学科」/ 托盘「学科」 | 切换专业领域，下一次请求生效 |
-| 「存为记忆」 | 校对译文后保存，供相似句翻译参考 |
-| 托盘右键 | 设置、学科、暂停监听、联网查询、开机自启动、退出 |
+## 仓库结构
 
-程序启动后安静地在后台运行（托盘图标）。改模型、填 API、开联网或严格离线，都在**托盘右键 →「设置…」**里。
-更多操作（固定窗口、停止生成、追问换行、输入翻译快捷键等）见 [docs/USAGE.md](docs/USAGE.md)。
+```
+dongyi-rs/                  Rust / Tauri 重制版（主推）
+  src-tauri/                应用壳：三窗（弹窗/浮标/设置）、托盘、IPC、编排线程
+  src/                      React 前端（三视图 + 主题）
+  crates/dongyi-core/       配置读写（差异事务）、数据目录、单实例
+  crates/dongyi-capture/    UIA 取词 + 剪贴板兜底（STA）
+  crates/dongyi-trigger/    全局热键 / 鼠标钩子
+  crates/dongyi-llm/        LLM 流式客户端、取消/预热/保活、联网检索
+  crates/dongyi-knowledge/  领域 / 术语表 / 翻译记忆 / 知识库（BM25）
+  docs/                     验收记录 + 阶段审查报告 + 界面截图
+(根目录)                    Python 原版（v0.1.x）：app.py / popup.py / ...，说明见 PYTHON_VERSION.md
+.github/workflows/          CI（ci.yml = Python 原版；ci-rust.yml = 重制版）
+```
 
-## 配置
-
-首次运行自动生成 `config.json`（打包版写在 `%APPDATA%\dongyi\`）。字段说明见
-[`config.example.json`](config.example.json) 和 [docs/CONFIG.md](docs/CONFIG.md)。
-
-## 文档
-
-- 详细用法 → [docs/USAGE.md](docs/USAGE.md)
-- 配置字段与模型 / 联网 / 离线 → [docs/CONFIG.md](docs/CONFIG.md)
-- 领域适配与个人知识库 → [docs/DOMAINS.md](docs/DOMAINS.md)
-- 排错与已知限制 → [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-- 开发、测试、打包 → [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
-
-## 许可
-
-[GPL-3.0-only](LICENSE)。第三方组件许可与分发注意事项见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+许可：GPL-3.0（沿用原版；第三方组件许可见 `dongyi-rs/THIRD_PARTY_NOTICES.md` 与 `dongyi-rs/THIRD_PARTY_LICENSES.txt`）。
