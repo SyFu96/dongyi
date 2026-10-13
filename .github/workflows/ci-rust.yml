@@ -1,0 +1,45 @@
+name: ci-rust
+
+on:
+  push:
+    paths:
+      - "dongyi-rs/**"
+      - ".github/workflows/ci-rust.yml"
+  pull_request:
+    paths:
+      - "dongyi-rs/**"
+      - ".github/workflows/ci-rust.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: dongyi-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dongyi-rs/package-lock.json
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dongyi-rs
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo tests
+        run: cargo test --workspace --locked

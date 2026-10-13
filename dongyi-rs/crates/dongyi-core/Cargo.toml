@@ -1,0 +1,11 @@
+[package]
+name = "dongyi-core"
+version = "0.1.0"
+edition = "2024"
+description = "懂译核心：数据目录解析、config.json 加载/合并/保存（与 Python 版格式完全兼容）"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

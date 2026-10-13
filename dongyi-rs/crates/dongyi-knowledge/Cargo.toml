@@ -1,0 +1,9 @@
+[package]
+name = "dongyi-knowledge"
+version = "0.1.0"
+edition = "2024"
+description = "领域适配 / 术语表 / 翻译记忆 / 知识库 BM25（Python domains.py + tm.py + knowledge.py 移植，数据文件共用）"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

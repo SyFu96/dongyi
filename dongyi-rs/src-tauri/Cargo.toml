@@ -1,0 +1,36 @@
+[package]
+name = "dongyi-rs"
+version = "0.1.0"
+description = "懂译：划词翻译（Rust 重构版）"
+authors = ["SyFu96"]
+edition = "2024"
+
+[lib]
+name = "dongyi_rs_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+dongyi-core = { path = "../crates/dongyi-core" }
+dongyi-capture = { path = "../crates/dongyi-capture" }
+dongyi-trigger = { path = "../crates/dongyi-trigger" }
+dongyi-llm = { path = "../crates/dongyi-llm" }
+dongyi-knowledge = { path = "../crates/dongyi-knowledge" }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+]
+

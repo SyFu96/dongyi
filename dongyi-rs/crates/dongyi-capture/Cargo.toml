@@ -1,0 +1,25 @@
+[package]
+name = "dongyi-capture"
+version = "0.1.0"
+edition = "2024"
+description = "懂译取词：UIA 读选中文本 + 受控剪贴板兜底（capture.py 忠实移植）"
+
+[dependencies]
+log = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+uiautomation = "0.25"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

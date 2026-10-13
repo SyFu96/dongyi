@@ -1,0 +1,19 @@
+[package]
+name = "dongyi-llm"
+version = "0.1.0"
+edition = "2024"
+description = "懂译 LLM 流式客户端（llm.py 忠实移植）：Ollama NDJSON + OpenAI 兼容 SSE 双后端，取消/预热/保活/推迟惰性请求由编排层控制"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = "0.4"
+thiserror = "2"
+futures-util = "0.3"
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls", "blocking"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "io-util", "net"] }

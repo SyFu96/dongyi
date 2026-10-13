@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "懂译全部窗口：popup（弹窗）与 settings（设置）与 icon（浮标）",
+  "windows": ["popup", "settings", "icon"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "core:window:allow-start-dragging"
+  ]
+}

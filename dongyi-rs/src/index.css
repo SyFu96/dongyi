@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/*
+ * 设计 tokens —— 按需求方提供的 ArtCraft 桌面 Launcher 截图重定（2026-10-12）：
+ * 浅色为主：纸白底 #FAF9F6 + 暖黑字，1px 细线栅格分割，全直角(0px)，
+ * 黑底白字激活 chip，彩色编号块（01蓝 02橙红 03紫 04琥珀），
+ * 等宽大写英文 micro-label，白底黑边主按钮，状态行绿色 mono。无投影。
+ * 深色为反演辅助主题（跟系统/用户偏好）。
+ */
+:root {
+  --bg: #faf9f6;
+  --bg-elevated: #ffffff;
+  --surface: #f1efe9;
+  --surface-hover: #eae7e0;
+  --field: #f3f1ec;
+  --border: #d9d6cf;
+  --border-strong: #b9b5ac;
+  --line: #c9c6bf;
+  --text: #1b1a17;
+  --muted: #6b6963;
+  --accent: #2e6bff;
+  --c-02: #e85827;
+  --c-03: #8b47f0;
+  --c-04: #f2a81d;
+  --ok: #0e9f6e;
+  --chip-bg: #17181a;
+  --chip-text: #ffffff;
+}
+
+html.dark {
+  --bg: #151513;
+  --bg-elevated: #1d1d1b;
+  --surface: #202020;
+  --surface-hover: #2a2a28;
+  --field: #1b1b19;
+  --border: rgba(255, 255, 255, 0.14);
+  --border-strong: rgba(255, 255, 255, 0.3);
+  --line: rgba(255, 255, 255, 0.12);
+  --text: #f2f1ee;
+  --muted: #a19e96;
+  --accent: #74aaff;
+  --c-02: #ff7a4d;
+  --c-03: #a377ff;
+  --c-04: #ffc351;
+  --ok: #3ecf94;
+  --chip-bg: #ffffff;
+  --chip-text: #151513;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-field: var(--field);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-c02: var(--c-02);
+  --color-c03: var(--c-03);
+  --color-c04: var(--c-04);
+  --color-ok: var(--ok);
+  --color-chip-bg: var(--chip-bg);
+  --color-chip-text: var(--chip-text);
+  --font-mono-label: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: transparent; /* 无框透明窗：内容即界面 */
+  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  color: var(--text);
+  /* 不抢焦点窗口的文本默认不可选（坑 8 副作用，与 Python 版一致） */
+  user-select: none;
+}
+
+/* ArtCraft Launcher 风：等宽大写英文 micro-label */
+@utility micro-label {
+  font-family: var(--font-mono-label);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  line-height: 1.2;
+}
+
+/* P4 设置页表单元素（全直角、1px 细线、无投影，同 launcher 语言） */
+@layer components {
+  .ti {
+    flex: 1 1 0%;
+    min-width: 0;
+    background: var(--field);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+    font-size: 13px;
+    color: var(--text);
+    outline: none;
+  }
+  .ti:focus {
+    border-color: var(--border-strong);
+  }
+  .textSel {
+    background: var(--field);
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+    font-size: 12px;
+    color: var(--text);
+    outline: none;
+  }
+  .textSel:focus {
+    border-color: var(--border-strong);
+  }
+}
+
+/* 编号色块（01/02/…）：mono 数字白字（浅色编号块内） */
+@utility num-chip {
+  font-family: var(--font-mono-label);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+}
