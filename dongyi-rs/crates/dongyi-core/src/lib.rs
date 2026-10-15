@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+pub mod translation;
+
 /// 内置默认配置（与 Python 版 DEFAULTS 逐字段一致）。
 pub const DEFAULTS_JSON: &str = r#"{
   "provider": "ollama",
@@ -29,6 +31,7 @@ pub const DEFAULTS_JSON: &str = r#"{
   },
   "web_search": {
     "enabled": false,
+    "kinds": {"explain": true, "chat": true, "input": false},
     "endpoint": "https://ollama.com/api/web_search",
     "api_key": "",
     "max_results": 5

@@ -189,6 +189,16 @@ impl Ori {
             .to_owned()
     }
 
+    /// 语向约束放在参考材料之后，避免模型只改写英文或跟随反向译例。
+    fn translation_system(&self, kind: &str, text: &str, target: Option<&str>, search_context: &str) -> String {
+        let prompt = target.filter(|t| !t.trim().is_empty()).map_or_else(
+            || self.prompt_of("translate"),
+            |t| format!("你是翻译引擎。把用户输入的内容翻译成{t}。只输出译文，保留换行与格式，不要任何解释。"),
+        );
+        let base = self.compose_system(kind, text, prompt, search_context);
+        format!("{base}\n\n{}", dongyi_core::translation::instruction(text, target))
+    }
+
     /// P5：统一组装 system prompt（Python _compose_system 移植）：
     /// 基础 prompt → 领域说明 → 术语对照 → 知识库片段 → 参考译例(TM) → 联网检索。
     /// 领域段只在激活领域时追加；TM 通用模式也生效（translate/input）。
@@ -447,7 +457,7 @@ fn llm_event_json(ev: &LlmEvent) -> Value {
 /// 向某 kind 发起 LLM 请求（requested 去重：解释惰性、同原文不重复请求）。
 /// 成功入队后把 req_id 绑进会话：该 kind 的迟到事件若代沟不匹配将被丢弃
 /// （用户实测"上次追问/输入的结果重新出现"的根因修复）。
-/// 解释走联网检索分支（web_search.enabled + key）；translate/input 永不检索。
+/// 解释按独立搜索配置检索；划词译文保持直接翻译。
 fn dispatch_request(ori: &SharedOri, kind: &str) {
     let (text, cfg) = {
         let mut s = ori.session.lock().unwrap();
@@ -461,9 +471,13 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
     }
     let provider = ori.provider_for(kind);
     // P5：translate/explain 初始请求同样走统一组装链
-    let sys = ori.compose_system(kind, &text, ori.prompt_of(kind), "");
+    let sys = if kind == "translate" {
+        ori.translation_system(kind, &text, None, "")
+    } else {
+        ori.compose_system(kind, &text, ori.prompt_of(kind), "")
+    };
     let msg = vec![("system".into(), sys), ("user".into(), text.clone())];
-    if kind == "explain" && search_enabled(&cfg) {
+    if kind == "explain" && dongyi_llm::search::enabled_for(&cfg, kind) {
         // msgs 在 on_search_done 时按当时会话重新组装（RR2），这里只带 query
         search_then_request(ori.clone(), kind.to_owned(), text, cfg);
         return;
@@ -477,13 +491,6 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
             .pending_source
             .insert(kind.to_owned(), (rid, text));
     }
-}
-
-/// web_search 准入：总开关 + api_key（config 或 OLLAMA_API_KEY）+ 非严格离线
-fn search_enabled(cfg: &Value) -> bool {
-    cfg["web_search"]["enabled"].as_bool().unwrap_or(false)
-        && !dongyi_llm::search::api_key(&cfg["web_search"]).is_empty()
-        && !cfg["offline"].as_bool().unwrap_or(false)
 }
 
 /// 检索 → 注入 → 请求（RR2 重构：结果交回编排线程，防"停止后复活/污染新会话"）：
@@ -544,19 +551,25 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
         eprintln!("[orch] search stale drop kind={kind} (sgen superseded)");
         return;
     }
-    let Some(sel) = Some(ori.session.lock().unwrap().text.clone()) else {
-        return;
+    let (sel, target) = {
+        let s = ori.session.lock().unwrap();
+        if kind == "input" {
+            (s.last_input.clone().unwrap_or_default(), s.last_target.clone())
+        } else {
+            (s.text.clone(), None)
+        }
     };
     if sel.is_empty() {
         return;
     }
-    if !context.is_empty() {
-        // ctx 注入 system 末尾（Python _compose_system 追加顺序同款）——
-        // msgs 由发起方缓存于 SearchDone；这里重新按 kind 组装（与发起一致）
-    }
     // 重新组装消息（与发起时同构），注入 ctx 后 bind
     let provider = ori.provider_for(kind);
+    let input_source = (kind == "input").then(|| sel.clone());
     let msg = match kind {
+        "input" => {
+            let sys = ori.translation_system("input", &sel, target.as_deref(), &context);
+            vec![("system".into(), sys), ("user".into(), sel)]
+        }
         "chat" => {
             let s = ori.session.lock().unwrap();
             let question = s.last_question.clone().unwrap_or_default();
@@ -588,7 +601,10 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
             vec![("system".into(), sys), ("user".into(), sel)]
         }
     };
-    bind_request(ori, kind, LlmRequest::from_cfg(kind, msg, &ori.cfg()).with_provider(provider));
+    let rid = bind_request(ori, kind, LlmRequest::from_cfg(kind, msg, &ori.cfg()).with_provider(provider));
+    if let Some(source) = input_source {
+        ori.session.lock().unwrap().pending_source.insert("input".into(), (rid, source));
+    }
 }
 
 /// 统一提交 + req_id 绑定（RR3：拒绝路径也登记，保证 Failed 事件不被自家过滤）。
@@ -710,15 +726,27 @@ fn on_mouse_down(ori: &SharedOri) {
 
 /// 热键路径：input 呼出输入翻译；translate/explain 走取词兜底。
 fn on_hotkey(ori: &SharedOri, kind: &str) {
+    let foreground = dongyi_capture::foreground_hwnd().unwrap_or(0);
+    eprintln!("[hotkey] received kind={kind} foreground={}", dongyi_capture::process_name_of_hwnd(foreground));
     if kind == "input" {
         open_input_translation(ori);
         return;
     }
     if ori.paused.load(Ordering::Relaxed) {
+        eprintln!("[hotkey] skipped kind={kind} reason=paused");
         return;
     }
-    // 焦点在自己的窗口内时不触发（Python: foreground_pid == self pid 跳过）
+    // 已有原文且焦点就在弹窗时，热键切换当前会话；设置窗仍忽略取词热键。
     if foreground_is_self() {
+        let in_popup = ori.popup().and_then(|w| w.hwnd().ok()).is_some_and(|h| h.0 as isize == foreground);
+        if in_popup && !ori.session.lock().unwrap().text.trim().is_empty() {
+            eprintln!("[hotkey] switch current popup kind={kind}");
+            let _ = ori.app.emit("popup:tab", json!({ "kind": kind }));
+            on_tab(ori, kind);
+            if kind == "translate" { dispatch_request(ori, kind); }
+        } else {
+            eprintln!("[hotkey] skipped kind={kind} reason=own-ui-or-empty-source");
+        }
         return;
     }
     // 热键打断尚未生效的防抖候选（Python: self._debounce.stop()）；
@@ -767,6 +795,20 @@ fn interactive_reset(ori: &Ori) -> Result<(), String> {
     set_popup_focusable(ori, false)
 }
 
+/// 输入窗口先显示再激活；记录原生窗口失败，避免热键收到却无反馈。
+fn reveal_popup(ori: &Ori, interactive: bool) {
+    let Some(popup) = ori.popup() else { return };
+    let result = (|| -> tauri::Result<()> {
+        popup.unminimize()?;
+        popup.set_focusable(interactive)?;
+        popup.show()?;
+        if interactive { popup.set_focus()?; }
+        Ok(())
+    })();
+    eprintln!("[popup] reveal interactive={interactive} result={result:?} visible={:?} position={:?}",
+        popup.is_visible(), popup.outer_position());
+}
+
 fn close_all(ori: &Ori) {
     // Gate B4 修复：关闭作废全部在途取词请求（含已排队未完成的），防止
     // "关闭后迟到的结果重新浮出 UI"；同时冻结浮标自动隐藏计时
@@ -800,7 +842,12 @@ fn close_all(ori: &Ori) {
 /// Gate B4 修复：消费前复查 epoch，关闭/新会话期间到达的迟到结果整体丢弃。
 fn on_captured(ori: &SharedOri, res: CaptureResult) {
     let current_epoch = ori.req_epoch.load(Ordering::SeqCst);
-    if res.job.epoch != current_epoch {
+    if res.job.purpose != "icon" {
+        eprintln!("[capture] kind={} process={} selected_chars={} stale={}",
+            res.job.purpose, dongyi_capture::process_name_of_hwnd(res.job.target_hwnd),
+            res.sel.as_ref().map_or(0, |s| s.text.chars().count()), res.job.epoch != current_epoch);
+    }
+    if res.job.epoch != current_epoch || !ori.worker.is_current(res.job.id) {
         return; // 迟到结果：所属会话已被关闭/取代
     }
     let sel = res.sel;
@@ -824,9 +871,25 @@ fn on_captured(ori: &SharedOri, res: CaptureResult) {
 
     // —— 热键路径（purpose ∈ {'translate','explain'}）
     let Some(sel) = sel else {
-        // 取词失败：鼠标处 1.5s 小提示（P4 独立 Toast；当前仅事件）
+        // 切窗后的结果直接放弃；真实取词失败则显示提示，不能只发无人监听的事件。
+        if dongyi_capture::foreground_hwnd().unwrap_or(0) != res.job.target_hwnd {
+            return;
+        }
         let (x, y) = res.job.phys.unwrap_or_else(cursor_physical);
-        let _ = ori.app.emit("capture:fail", json!({ "x": x, "y": y }));
+        let Some(popup) = ori.popup() else { return };
+        if let Some(icon) = ori.icon() { let _ = icon.hide(); }
+        *ori.icon_sel.lock().unwrap() = None;
+        ori.icon_epoch.fetch_add(1, Ordering::SeqCst);
+        begin_session(ori);
+        ori.session.lock().unwrap().text.clear();
+        let pos = clamp_into_work_area((x + 12, y + 12), Some(&popup));
+        let _ = popup.set_position(Position::Physical(tauri::PhysicalPosition::new(pos.0, pos.1)));
+        let _ = ori.app.emit("popup:open", json!({
+            "text": "", "truncated": false, "source": "uia", "kind": res.job.purpose,
+            "error": "未能读取选中文字。请重新选中正文后再试，或切换到「输入翻译」粘贴文字。"
+        }));
+        let _ = ori.app.emit("popup:pin", json!({ "on": ori.pinned.load(Ordering::Relaxed) }));
+        reveal_popup(ori, false);
         return;
     };
     let anchor = choose_anchor(&sel, res.job.phys);
@@ -933,8 +996,7 @@ fn open_popup(ori: &SharedOri, sel: Selection, kind: String) {
     let pinned = ori.pinned.load(Ordering::Relaxed);
     let _ = ori.app.emit("popup:pin", json!({ "on": pinned }));
     eprintln!("[orch] open_popup kind={kind} pinned={pinned} text_len={text_len}");
-    let _ = interactive_reset(ori); // 开弹窗默认非交互（结果展示不抢焦点）
-    let _ = popup.show();
+    reveal_popup(ori, false); // 结果展示不抢焦点
 }
 
 /// 输入翻译：弹窗已开就切标签，否则在光标处打开（Python open_input_translation）。
@@ -942,6 +1004,13 @@ fn open_popup(ori: &SharedOri, sel: Selection, kind: String) {
 /// 用空原文 popup:open 清掉正在看的会话）。
 fn open_input_translation(ori: &SharedOri) {
     let Some(popup) = ori.popup() else { return };
+    // 输入热键取消排队取词，迟到的结果不能覆盖新输入窗口或重新浮出图标。
+    ori.worker.cancel_pending();
+    ori.debounce.fetch_add(1, Ordering::SeqCst);
+    ori.icon_epoch.fetch_add(1, Ordering::SeqCst);
+    ori.last_attempt.lock().unwrap().take();
+    *ori.icon_sel.lock().unwrap() = None;
+    if let Some(icon) = ori.icon() { let _ = icon.hide(); }
     let already_open = popup.is_visible().unwrap_or(false);
     if !already_open {
         begin_session(ori); // Gate P3-B2：输入热键的空原文事件也要清后端旧会话
@@ -949,18 +1018,16 @@ fn open_input_translation(ori: &SharedOri) {
         let (x, y) = cursor_physical();
         let pos = clamp_into_work_area((x - 12, y + 12), Some(&popup));
         let _ = popup.set_position(Position::Physical(tauri::PhysicalPosition::new(pos.0, pos.1)));
-        *ori.icon_sel.lock().unwrap() = None;
-        let _ = interactive_reset(ori); // 输入标签属于交互态
         let _ = ori.app.emit(
             "popup:open",
             json!({ "text": "", "truncated": false, "source": "input", "kind": "input" }),
         );
-        let _ = popup.show();
+        let _ = ori.app.emit("popup:pin", json!({ "on": ori.pinned.load(Ordering::Relaxed) }));
     } else {
         // 已开：轻量切标签，不清会话/结果（Python show_input_tab 同语义）
         let _ = ori.app.emit("popup:tab", json!({ "kind": "input" }));
-        let _ = set_popup_focusable(ori, true);
     }
+    reveal_popup(ori, true);
 }
 
 // ---------------------------------------------------------------- 进程判定
@@ -1013,6 +1080,7 @@ fn on_chat_ask(ori: &SharedOri, question: &str, translation: &str, explanation: 
         s.last_question = Some(question.clone());
         s.last_translation = Some(translation.to_owned());
         s.last_explanation = Some(explanation.to_owned());
+        s.search_gen.remove("chat"); // 新问题使旧检索失效，即使本次已关闭搜索。
         (source, s.chat_history.clone())
     };
     // system = prompts.chat + 原文/译文/解释 + 领域/术语（Python chat 的统一组装链）
@@ -1035,7 +1103,7 @@ fn on_chat_ask(ori: &SharedOri, question: &str, translation: &str, explanation: 
     let cfg = ori.cfg();
     // 联网检索（Python _begin_web("chat", question)）：enabled 且有 key 才检索；
     // msgs 在 on_search_done 时按当前会话状态重新组装（RR2）
-    if search_enabled(&cfg) {
+    if dongyi_llm::search::enabled_for(&cfg, "chat") {
         search_then_request(ori.clone(), "chat".into(), question, cfg);
         return;
     }
@@ -1053,17 +1121,17 @@ fn on_input_ask(ori: &SharedOri, text: &str, target: &str) {
         let mut s = ori.session.lock().unwrap();
         s.last_input = Some(text.to_owned());
         s.last_target = if target.is_empty() { None } else { Some(target.to_owned()) };
+        s.search_gen.remove("input");
     }
     let provider = ori.provider_for("input");
-    // target 非空 → 专属语向 prompt（Python _input_prompt）；空 → 自动中英互译
-    let sys = if target.is_empty() {
-        ori.prompt_of("translate")
-    } else {
-        format!(
-            "你是翻译引擎。把用户输入的内容翻译成{target}。只输出译文，保留换行与格式，不要任何解释。"
-        )
-    };
-    let msg = vec![("system".into(), ori.compose_system("input", text, sys, "")), ("user".into(), text.to_owned())];
+    let cfg = ori.cfg();
+    if dongyi_llm::search::enabled_for(&cfg, "input") {
+        search_then_request(ori.clone(), "input".into(), text.to_owned(), cfg);
+        return;
+    }
+    // 与划词共用自动语向约束；手动目标独立保存在 last_target 中供重试回放。
+    let sys = ori.translation_system("input", text, Some(target), "");
+    let msg = vec![("system".into(), sys), ("user".into(), text.to_owned())];
     let rid = bind_request(ori, "input", LlmRequest::from_cfg("input", msg, &ori.cfg()).with_provider(provider));
     // P5-M3：登记本次请求的原文快照（TM 存记忆配对）
     ori.session
@@ -1345,7 +1413,7 @@ fn on_kind_provider(ori: &Ori, kind: &str, provider: String) {
             Out::Same
         } else if provider == "openai" && dongyi_llm::cloud_key_for(&cand["cloud"]).is_empty() {
             Out::Refused {
-                msg: "云端 api_key 未配置：在配置文件 cloud.api_key 填入后再切联网".into(),
+                msg: "云端模型 key 未配置：请在设置中填写云端 api_key，或选择无需模型 key 的本地模型".into(),
             }
         } else if let Err(e) = dongyi_core::save_config(&cand) {
             // 写盘失败：内存保持原值（guard 未被赋值），事务撤销

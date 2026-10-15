@@ -41,7 +41,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextRange,
-    UIA_TextPatternId,
+    UIA_TextPatternId, UIA_DocumentControlTypeId, UIA_WindowControlTypeId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
@@ -185,13 +185,38 @@ const TERMINAL_EXCLUDED_CLASSES: [&str; 3] = [
 
 // ---------------------------------------------------------------- UIA 取词
 
-/// UIA 读焦点控件的选中文本；失败返回 None（COM 异常/无 TextPattern）。
+/// UIA 读选区；网页焦点可能停在无 TextPattern 的容器上，沿父链查找文本宿主。
 /// 仅可在确保 COM 已初始化、且持有线程上调用。
 pub fn uia_selection(automation: &IUIAutomation, max_text_len: usize) -> Option<Selection> {
     unsafe {
-        let focused = automation.GetFocusedElement().ok()?;
-        let unknown = focused.GetCurrentPattern(UIA_TextPatternId).ok()?;
-        let pattern: IUIAutomationTextPattern = unknown.cast().ok()?;
+        let mut element = automation.GetFocusedElement().ok()?;
+        let process_id = element.CurrentProcessId().ok()?;
+        let walker = automation.ControlViewWalker().ok()?;
+        let started = Instant::now();
+        // 只沿同一进程的祖先查找，遇到文本宿主即停止，避免跨窗读取别处选区。
+        for _ in 0..16 {
+            if element.CurrentProcessId().ok()? != process_id {
+                return None;
+            }
+            if let Ok(pattern) = element.GetCurrentPattern(UIA_TextPatternId)
+                .and_then(|p| p.cast::<IUIAutomationTextPattern>())
+            {
+                return selection_from_pattern(&pattern, max_text_len);
+            }
+            let control_type = element.CurrentControlType().ok()?;
+            if control_type == UIA_DocumentControlTypeId || control_type == UIA_WindowControlTypeId
+                || started.elapsed() >= Duration::from_secs(1)
+            {
+                return None;
+            }
+            element = walker.GetParentElement(&element).ok()?;
+        }
+    }
+    None
+}
+
+fn selection_from_pattern(pattern: &IUIAutomationTextPattern, max_text_len: usize) -> Option<Selection> {
+    unsafe {
         let ranges = pattern.GetSelection().ok()?;
         let n = ranges.Length().ok()?;
         for i in 0..n {
@@ -701,7 +726,7 @@ pub struct CaptureResult {
 /// latest-id 机制：submit 时 req_id 递增；silent 请求在三个检查点被淘汰
 /// （出队时、自动兜底发键前、投递前）——连拖多次/拖滚动条/切窗时旧请求
 /// 自然过期，且不会把别的窗口的选区投给 GUI。
-/// epoch 感知（Gate 回归 B4）：explicit 提交废止排队中的 silent（latest=MAX）；
+/// epoch 感知（Gate 回归 B4）：新请求废止此前排队取词；
 /// silent/explicit 在 UIA、发键、投递前均与 UI 会话 epoch 复核。
 pub struct CaptureWorker {
     tx: mpsc::Sender<Option<CaptureJob>>,
@@ -735,13 +760,7 @@ impl CaptureWorker {
         epoch: u64,
     ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        if mode == Mode::Silent {
-            // latest-id 淘汰只作用于 silent 路径；explicit 永远有效
-            self.latest.store(id, Ordering::Relaxed);
-        } else {
-            // Gate 回归 B4：显式提交废止队列中的 silent（热键打断拖选候选）
-            self.latest.store(u64::MAX, Ordering::Relaxed);
-        }
+        self.latest.store(id, Ordering::Relaxed);
         let _ = self.tx.send(Some(CaptureJob {
             id,
             epoch,
@@ -757,6 +776,15 @@ impl CaptureWorker {
     /// 通知线程结束。
     pub fn stop(&self) {
         let _ = self.tx.send(None);
+    }
+
+    /// 只取消取词，不影响当前弹窗的翻译流与联网检索。
+    pub fn cancel_pending(&self) {
+        self.latest.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    pub fn is_current(&self, id: u64) -> bool {
+        self.latest.load(Ordering::Relaxed) == id
     }
 }
 
@@ -775,9 +803,15 @@ fn worker_run(
                 // 前台窗口=submit 时的目标窗 + UI 会话 epoch 未变
                 let target = job.target_hwnd;
                 let still_valid = || {
-                    job.epoch == ui_epoch.load(Ordering::Relaxed)
+                    job.id == latest.load(Ordering::Relaxed)
+                        && job.epoch == ui_epoch.load(Ordering::Relaxed)
                         && foreground_hwnd().unwrap_or(0) == target
                 };
+                // 连按产生的过期任务不能继续排队执行跨进程 UIA 调用。
+                if !still_valid() {
+                    continue;
+                }
+                let started = Instant::now();
                 let sel = match automation
                     .as_ref()
                     .and_then(|a| uia_selection(a, job.cfg.max_text_len))
@@ -789,6 +823,8 @@ fn worker_run(
                         clipboard_selection(job.cfg.max_text_len, false, Some(still))
                     }
                 };
+                eprintln!("[capture-worker] kind={} elapsed_ms={} source={:?} valid={}",
+                    job.purpose, started.elapsed().as_millis(), sel.as_ref().map(|s| s.source), still_valid());
                 Some(sel)
             }
             Mode::Silent => {

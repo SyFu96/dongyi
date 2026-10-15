@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { CopyAnswer, MarkdownContent } from "./MarkdownContent";
 
 type View = "popup" | "settings" | "icon";
 
@@ -22,6 +23,7 @@ export interface OpenPayload {
   truncated: boolean;
   source: "uia" | "clipboard" | "input";
   kind: "translate" | "explain" | "chat" | "input";
+  error?: string;
 }
 
 type LlmMsg =
@@ -36,6 +38,7 @@ interface ResultState {
   status: Status;
   error?: string;
   secs?: number;
+  retryable?: boolean;
   truncated?: boolean; // 流被截断（EOF 无终止行），状态区标注"可能不完整"
 }
 
@@ -284,7 +287,7 @@ function PopupView() {
       setSource(p.text);
       setKind(p.kind);
       setTruncated(p.truncated);
-      setResults({});
+      setResults(p.error ? { [p.kind]: { text: "", status: "failed", error: p.error, retryable: false } } : {});
       setChat([]);
       chatStreaming.current = false;
       buffers.current = {};
@@ -300,6 +303,7 @@ function PopupView() {
     reg<LlmMsg>("llm:event", (m) => {
       const k = m.kind as TabKey;
       if (m.type === "pending") {
+        if (k === "chat") chatStreaming.current = false;
         activeReq.current[k] = m.req_id;
         buffers.current[k] = "";
         setResults((p) => ({ ...p, [k]: { text: "", status: "pending" } }));
@@ -360,6 +364,7 @@ function PopupView() {
 
     reg<{ kind: string }>("llm:stopped", (p) => {
       const k = p.kind as TabKey;
+      if (k === "chat") chatStreaming.current = false;
       activeReq.current[k] = undefined;
       buffers.current[k] = "";
       setResults((prev) => ({
@@ -370,6 +375,11 @@ function PopupView() {
 
     reg<{ kind: string }>("llm:reset", (p) => {
       const k = p.kind as TabKey;
+      if (k === "chat") {
+        chatStreaming.current = false;
+        // 重试替换上一段未完成回答，保留原问题与更早的对话。
+        setChat((c) => c[c.length - 1]?.role === "assistant" ? c.slice(0, -1) : c);
+      }
       buffers.current[k] = "";
       activeReq.current[k] = undefined; // Gate 复审 RR4：reset 清绑定
       setResults((prev) => ({ ...prev, [k]: { text: "", status: "pending" } }));
@@ -637,6 +647,7 @@ function PopupCard({
         ) : activeTab === "追问" ? (
           <ChatView
             chat={chat}
+            state={results.chat ?? EMPTY}
             draft={chatDraft}
             setDraft={onChatDraft}
             onSubmit={onAskChat}
@@ -725,11 +736,16 @@ function PopupCard({
 function ResultView({ tab, state }: { tab: string; state: ResultState }) {
   return (
     <div className="px-3 pt-2 pb-3">
-      <div className="text-sm leading-relaxed whitespace-pre-wrap select-text min-h-[3rem]">
+      {tab === "解释" && state.text && (
+        <div className="flex justify-end mb-2"><CopyAnswer text={state.text} /></div>
+      )}
+      <div className="text-sm leading-relaxed select-text min-h-[3rem]">
         {state.status === "idle" || state.status === "pending" && state.text === "" ? (
           <span className="text-muted">{tab === "译文" ? "翻译请求中…" : "解释请求中…"}</span>
         ) : (
-          state.text || <span className="text-muted">…</span>
+          state.text ? (
+            tab === "解释" ? <MarkdownContent text={state.text} /> : <div className="whitespace-pre-wrap">{state.text}</div>
+          ) : <span className="text-muted">…</span>
         )}
       </div>
     </div>
@@ -790,16 +806,19 @@ function StatusMeta({ kind, state }: { kind: TabKey; state: ResultState }) {
   return (
     <span className="flex items-center gap-2 text-error">
       <span className="normal-case tracking-normal">{state.error ?? "失败"}</span>
-      <button className="underline underline-offset-2" onClick={() => invoke("llm_retry", { kind })}>
-        重试
-      </button>
+      {state.retryable !== false && (
+        <button className="underline underline-offset-2" onClick={() => invoke("llm_retry", { kind })}>
+          重试
+        </button>
+      )}
     </span>
   );
 }
 
-/** 追问视图：气泡 + 本地/联网 chip + 输入（Enter 发送 / Shift+Enter 换行） */
+/** 追问视图：模型选择与联网检索独立。 */
 function ChatView({
   chat,
+  state,
   draft,
   setDraft,
   onSubmit,
@@ -809,6 +828,7 @@ function ChatView({
   onProvider,
 }: {
   chat: { role: string; text: string }[];
+  state: ResultState;
   draft: string;
   setDraft: (v: string) => void;
   onSubmit: () => void;
@@ -832,7 +852,7 @@ function ChatView({
           {curName}
         </span>
       </div>
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2 space-y-2">
         {chat.length === 0 && (
           <div className="text-muted text-sm">
             可以继续问：为什么这样翻译？能举个例子吗？追问会结合原文、译文和解释。
@@ -848,11 +868,31 @@ function ChatView({
           ) : (
             <div
               key={i}
-              className="max-w-[92%] bg-surface border border-line px-3 py-2 text-[13px] leading-relaxed whitespace-pre-wrap select-text"
+              className="w-full min-w-0 bg-surface border border-line px-3 py-2 text-[13px] leading-relaxed select-text"
             >
-              {m.text}
+              <MarkdownContent text={m.text} />
+              <div className="flex justify-end mt-2"><CopyAnswer text={m.text} /></div>
             </div>
           ),
+        )}
+        {state.status === "pending" && chat[chat.length - 1]?.role === "user" && (
+          <div role="status" className="text-sm text-muted border border-line p-3">
+            等待{chatProvider === "openai" ? "云端" : "本地"}模型回复…
+            {chatProvider === "openai" && "若服务繁忙，可停止后切换「本地」重试。"}
+          </div>
+        )}
+        {state.status === "failed" && (
+          <div role="alert" className="text-sm border border-line p-3">
+            <StatusMeta kind="chat" state={state} />
+          </div>
+        )}
+        {state.status === "stopped" && (
+          <div className="text-sm text-muted p-2">
+            已停止。
+            <button className="underline underline-offset-2" onClick={() => invoke("llm_retry", { kind: "chat" })}>
+              重试追问
+            </button>
+          </div>
         )}
       </div>
       <div className="shrink-0 border-t border-line p-2">
@@ -876,7 +916,7 @@ function ChatView({
   );
 }
 
-/** 后端选择 chip（本地/联网）：Launcher tab 语言；key 未配置时仍可点击——
+/** 后端选择 chip（本地/云端）：Launcher tab 语言；key 未配置时仍可点击——
  *  点击触发后端拒绝并给出明确原因（footer 显示），永远不"点了两下没反应"。 */
 function ProviderChip({
   provider,
@@ -898,7 +938,7 @@ function ProviderChip({
             key={p}
             title={
               p === "ollama"
-                ? `本地模型：${modelNames.local}`
+                ? `本地模型：${modelNames.local}（无需模型 API key；搜索独立配置）`
                 : cloudKeyOk
                   ? `云端模型：${modelNames.cloud}`
                   : `云端模型：${modelNames.cloud}（未配置 api_key，点击查看提示）`
@@ -908,7 +948,7 @@ function ProviderChip({
               activeChip ? "bg-chip-bg text-chip-text" : "text-muted hover:bg-surface"
             }`}
           >
-            {p === "ollama" ? "本地" : "联网"}
+            {p === "ollama" ? "本地" : "云端"}
           </button>
         );
       })}
@@ -916,7 +956,7 @@ function ProviderChip({
   );
 }
 
-/** 输入翻译：本地/联网模型选择 chip（Launcher tab 语言） + Enter 提交 + 流式结果 */
+/** 输入翻译：本地/云端模型选择 + Enter 提交 + 流式结果。 */
 function InputView({
   state,
   onSubmit,
@@ -1205,9 +1245,25 @@ function SettingsView() {
                     className="textSel"
                   >
                     <option value="ollama">本地 Ollama</option>
-                    <option value="openai">联网 OpenAI 兼容</option>
+                    <option value="openai">云端模型（需 API key）</option>
                   </select>
                 </Row>
+                {([["chat", "追问模型"], ["input", "输入翻译模型"]] as const).map(([kind, label]) => (
+                  <Row key={kind} label={label}>
+                    <select
+                      value={String(getIn(cfg, ["kind_providers", kind]) ?? "")}
+                      onChange={(e) => set(["kind_providers", kind], e.target.value)}
+                      className="textSel"
+                    >
+                      <option value="">跟随默认后端</option>
+                      <option value="ollama">本地模型（无需模型 key）</option>
+                      <option value="openai">云端模型（需模型 key）</option>
+                    </select>
+                  </Row>
+                ))}
+                <p className="py-2 text-[11px] text-muted leading-relaxed">
+                  本地模型在本机运行，不调用云端模型接口。联网检索在「联网搜索」中独立设置，搜索服务可能仍需要搜索 key。
+                </p>
                 <Row label="本地模型名">
                   <ModelSelect value={String(getIn(cfg, ["model"]) ?? "")} onChange={(v) => set(["model"], v)} />
                 </Row>
@@ -1215,10 +1271,10 @@ function SettingsView() {
                   <input className="ti w-36" value={String(getIn(cfg, ["keep_alive"]) ?? "")} onChange={(e) => set(["keep_alive"], e.target.value)} />
                   <span className="text-[11px] text-muted">何时 unload 本地模型（如 30m）</span>
                 </Row>
-                <Row label="联网 base_url">
+                <Row label="云端 base_url">
                   <input className="ti" value={String(getIn(cfg, ["cloud", "base_url"]) ?? "")} onChange={(e) => set(["cloud", "base_url"], e.target.value)} />
                 </Row>
-                <Row label="联网模型名">
+                <Row label="云端模型名">
                   <input className="ti" value={String(getIn(cfg, ["cloud", "model"]) ?? "")} onChange={(e) => set(["cloud", "model"], e.target.value)} />
                 </Row>
                 <Row label="云端 api_key">
@@ -1267,9 +1323,15 @@ function SettingsView() {
           )}
           {group === "search" && (
             <div className="border border-line bg-bg-elevated">
-              <div className="micro-label text-muted px-4 py-2 border-b border-line">Web Search / 联网检索（解释与追问）</div>
+              <div className="micro-label text-muted px-4 py-2 border-b border-line">Web Search / 联网检索</div>
               <div className="px-4 py-2">
-                <CheckRow cfg={cfg} set={set} keys={["web_search", "enabled"]} label="开启解释/追问联网检索" />
+                <CheckRow cfg={cfg} set={set} keys={["web_search", "enabled"]} label="启用联网检索" />
+                {([["explain", "解释时搜索"], ["chat", "追问时搜索"], ["input", "输入翻译时搜索（术语查证）"]] as const).map(([kind, label]) => (
+                  <CheckRow key={kind} cfg={cfg} set={set} keys={["web_search", "kinds", kind]} label={label} />
+                ))}
+                <p className="py-2 text-[11px] text-muted leading-relaxed">
+                  搜索与回答模型独立：选本地模型也可搜索，无需云端模型 key。搜索使用下方 Ollama 搜索 key；输入翻译默认不搜索，开启后只辅助核对术语与背景。
+                </p>
                 <Row label="检索 api_key">
                   <ApiKeyInput value={String(getIn(cfg, ["web_search", "api_key"]) ?? "")} onChange={(v) => set(["web_search", "api_key"], v)} />
                   <span className="text-[11px] text-muted">留空回退 OLLAMA_API_KEY 环境变量</span>

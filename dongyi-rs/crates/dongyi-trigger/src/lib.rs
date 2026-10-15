@@ -10,6 +10,7 @@
 //! - 键盘：Esc 全局关闭；热键组合触发时用 GetAsyncKeyState 现场核对修饰键
 //!   （状态机可能遗漏抬键事件，不能仅凭记忆把单个键当热键），并用
 //!   "按下集合"压制按键自动重复；注入事件（我们自己模拟的 Ctrl+C）忽略。
+//!   单独 Alt 组合优先由 RegisterHotKey/WM_HOTKEY 处理，避免前台菜单抢占。
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -22,13 +23,14 @@ use serde::Serialize;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_NOREPEAT,
+    VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT,
     LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_HOTKEY,
 };
 
 // ---------------------------------------------------------------- 事件类型
@@ -147,10 +149,30 @@ thread_local! {
 
 /// 钩子线程：装钩子 → 消息泵。
 fn pump(tx: mpsc::Sender<TriggerEvent>, specs: Arc<Vec<HotkeySpec>>) {
+    // 单独 Alt 组合由系统截获，避免 Office/浏览器在取词前执行自己的菜单命令。
+    // 其他组合保留原钩子路径；注册失败也保留旧路径并明确记录原因。
+    let mut registered = Vec::new();
+    let mut fallback = Vec::new();
+    let mut alt_keys = HashSet::new();
+    for (index, spec) in specs.iter().enumerate() {
+        if alt_only(spec) {
+            if !alt_keys.insert(spec.terminal_vk) { continue; } // 重复绑定保持首个优先
+            let id = 0x5100 + index as i32;
+            match unsafe { RegisterHotKey(None, id, MOD_ALT | MOD_NOREPEAT, spec.terminal_vk) } {
+                Ok(()) => {
+                    eprintln!("[hotkey] registered kind={} vk={}", spec.kind, spec.terminal_vk);
+                    registered.push((id, spec.kind.clone()));
+                    continue;
+                }
+                Err(error) => eprintln!("[hotkey] registration failed kind={} error={error}", spec.kind),
+            }
+        }
+        fallback.push(spec.clone());
+    }
     STATE.with(|s| {
         *s.borrow_mut() = Some(HookState {
-            tx,
-            specs,
+            tx: tx.clone(),
+            specs: Arc::new(fallback),
             down_pos: None,
             up_pos: None,
             up_t: None,
@@ -170,7 +192,13 @@ fn pump(tx: mpsc::Sender<TriggerEvent>, specs: Arc<Vec<HotkeySpec>>) {
         }
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            if msg.message == WM_HOTKEY {
+                if let Some((_, kind)) = registered.iter().find(|(id, _)| *id == msg.wParam.0 as i32) {
+                    let _ = tx.send(TriggerEvent::Hotkey { kind: kind.clone() });
+                }
+            }
+        }
 
         if let Ok(h) = mouse {
             let _ = UnhookWindowsHookEx(h);
@@ -178,7 +206,12 @@ fn pump(tx: mpsc::Sender<TriggerEvent>, specs: Arc<Vec<HotkeySpec>>) {
         if let Ok(h) = keyboard {
             let _ = UnhookWindowsHookEx(h);
         }
+        for (id, _) in registered { let _ = UnregisterHotKey(None, id); }
     }
+}
+
+fn alt_only(spec: &HotkeySpec) -> bool {
+    !spec.modifiers.is_empty() && spec.modifiers.iter().all(|name| *name == "alt")
 }
 
 // ---------------------------------------------------------------- 鼠标钩子
@@ -298,4 +331,21 @@ fn dist(a: (i32, i32), b: (i32, i32)) -> f64 {
     let dx = (a.0 - b.0) as f64;
     let dy = (a.1 - b.1) as f64;
     (dx * dx + dy * dy).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 单独alt组合使用系统注册其他组合保留旧路径() {
+        for key in ["e", "q", "t"] {
+            let spec = parse_hotkey("test", &format!("<alt>+{key}")).unwrap();
+            assert!(alt_only(&spec));
+            assert_eq!(spec.terminal_vk, key.to_ascii_uppercase().chars().next().unwrap() as u32);
+        }
+        for text in ["<ctrl>+<alt>+<shift>+e", "<win>+e", "e"] {
+            assert!(!alt_only(&parse_hotkey("test", text).unwrap()));
+        }
+    }
 }

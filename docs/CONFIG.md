@@ -20,7 +20,8 @@
 | `base_url` | 本地 Ollama 地址，默认 `http://localhost:11434` |
 | `model` | 本地模型名；想更小更快可用 `qwen3-vl:8b-instruct` |
 | `cloud` | 云端后端：`base_url` / `model` / `api_key` / `api_key_env` |
-| `web_search` | 联网检索：`enabled` / `endpoint` / `api_key` / `max_results` |
+| `web_search` | 联网检索：`enabled` / `endpoint` / `api_key` / `max_results`；Rust 版另支持下述 `kinds` 功能开关 |
+| `web_search.kinds` | Rust 版独立搜索开关：`explain`、`chat` 默认 `true`，`input` 默认 `false`；仍受总开关、搜索 key 和严格离线限制 |
 | `keep_alive` | 本地模型常驻时间 |
 | `max_text_len` | 选中文本超长截断阈值（字符） |
 | `debounce_ms` | 连续划选防抖 |
@@ -95,13 +96,26 @@ sioyek 等自绘阅读器不支持 UIA TextPattern，拖选取词拿不到选区
 
 ## 联网检索
 
-给「解释」和「追问」接入 [Ollama 托管搜索](https://docs.ollama.com/capabilities/web-search)：回答前先检索，再把结果作为上下文交给模型。**翻译标签不做联网检索**；个人知识库的本地检索可单独开启，见 [DOMAINS.md](DOMAINS.md)。
+给「解释」和「追问」接入 [Ollama 托管搜索](https://docs.ollama.com/capabilities/web-search)：回答前先检索，再把结果作为上下文交给模型。Rust 版的「输入翻译」也可单独开启搜索，默认关闭；划词「译文」不做联网检索。个人知识库的本地检索可单独开启，见 [DOMAINS.md](DOMAINS.md)。
 
 1. 到 [ollama.com/settings/keys](https://ollama.com/settings/keys) 建一个免费账号 API key；
 2. 填进 `web_search.api_key`（或设环境变量 `OLLAMA_API_KEY`）；
 3. 设 `web_search.enabled: true`，或运行时右键托盘 →「联网查询」。
 
-> ⚠️ 检索会把**解释的原文**、**追问的本轮问题**发送到 `ollama.com`（与模型是否本地无关）。
+Rust 版在「设置 → 模型」分别选择追问和输入翻译的本地/云端模型，在「设置 → 联网搜索」控制各功能是否搜索。弹窗的「本地 / 云端」按钮只切换模型；本地模型也可配合搜索，无需云端模型 key，搜索仍使用独立的 Ollama 搜索 key。
+
+```json
+"kind_providers": { "chat": "ollama", "input": "ollama" },
+"web_search": {
+  "enabled": true,
+  "kinds": { "explain": true, "chat": true, "input": false },
+  "api_key": "",
+  "endpoint": "https://ollama.com/api/web_search",
+  "max_results": 5
+}
+```
+
+> ⚠️ 检索会把**解释的原文**、**追问的本轮问题**，以及主动开启输入翻译搜索后的**输入文本**发送到 `ollama.com`（与模型是否本地无关）。
 
 ## 严格离线
 
