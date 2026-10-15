@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/dongyi-logo.png" width="96" alt="懂译 logo">
+<img src="dongyi-rs/src-tauri/icons/icon.png" width="96" alt="懂译 Rust 版应用图标">
 
 # 懂译 · dongyi
 
