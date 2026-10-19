@@ -301,30 +301,52 @@ fn clip_seq() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 
+/// 剪贴板监听器常在复制后短暂占用；有界等待，避免误报未选中。
+unsafe fn open_clipboard_with_retry(owner: Option<HWND>) -> bool { unsafe {
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(400);
+    loop {
+        if OpenClipboard(owner).is_ok() {
+            if started.elapsed() >= Duration::from_millis(10) {
+                eprintln!("[clipboard] opened wait_ms={}", started.elapsed().as_millis());
+            }
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}}
+
 /// 读剪贴板 CF_UNICODETEXT（带开板重试）。max_seq 提供时把"序号核对+读数据"
 /// 放进同一次开板窗口内：序号变化只说明"有人改过"，不证明就是目标应用响应
 /// Ctrl+C，读到的内容必须与发键后观测到的那次序号一致才可信。
 unsafe fn clipboard_text(max_seq: Option<u32>) -> Option<String> { unsafe {
-    for _ in 0..3 {
-        if OpenClipboard(None).is_err() {
-            thread::sleep(Duration::from_millis(5)); // 剪贴板被占用
-            continue;
-        }
+    if open_clipboard_with_retry(None) {
         let out = (|| {
             if let Some(seq) = max_seq {
                 if clip_seq() != seq {
+                    eprintln!("[clipboard] aborted reason=sequence-changed");
                     return None; // 序号又变了：读到的不一定是刚复制的那份，放弃
                 }
             }
             if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_err() {
+                eprintln!("[clipboard] aborted reason=unicode-unavailable");
                 return None;
             }
-            let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
-            read_handle_text(handle)
+            match GetClipboardData(CF_UNICODETEXT.0 as u32) {
+                Ok(handle) => read_handle_text(handle),
+                Err(error) => {
+                    eprintln!("[clipboard] aborted reason=read-failed code={:?}", error.code());
+                    None
+                }
+            }
         })();
         let _ = CloseClipboard();
         return out;
     }
+    eprintln!("[clipboard] timeout phase=read");
     None
 }}
 
@@ -368,11 +390,7 @@ struct ClipSnapshot {
 /// 递增；先记 seq 会把"渲染序号"误判为 Ctrl+C 的响应，把旧备份内容当选区。
 /// 读取失败（异常/类型异常）→ ok=False，静默不发键。
 unsafe fn clipboard_backup_snapshot() -> ClipSnapshot { unsafe {
-    for _ in 0..3 {
-        if OpenClipboard(None).is_err() {
-            thread::sleep(Duration::from_millis(5));
-            continue;
-        }
+    if open_clipboard_with_retry(None) {
         let out = (|| {
             let mut text_only = true;
             let mut fmt = 0u32;
@@ -407,6 +425,7 @@ unsafe fn clipboard_backup_snapshot() -> ClipSnapshot { unsafe {
         let _ = CloseClipboard();
         return out;
     }
+    eprintln!("[clipboard] timeout phase=backup");
     ClipSnapshot { seq: 0, text: None, text_only: false, ok: false } // 一直被占用
 }}
 
@@ -476,11 +495,7 @@ unsafe fn clipboard_owner_hwnd() -> Option<HWND> { unsafe {
 ///   用户新内容，跳过。
 /// - text=None 跳过还原；"" = 只 Empty（还原为空）。
 unsafe fn restore_clipboard_text_sync(hwnd: HWND, text: Option<&str>, expect_seq: u32) -> bool { unsafe {
-    for _ in 0..3 {
-        if OpenClipboard(Some(hwnd)).is_err() {
-            thread::sleep(Duration::from_millis(5)); // 被其他程序占用
-            continue;
-        }
+    if open_clipboard_with_retry(Some(hwnd)) {
         let out = (|| {
             if clip_seq() != expect_seq {
                 log::debug!("还原前剪贴板又被改动，跳过写回");
@@ -519,6 +534,7 @@ unsafe fn restore_clipboard_text_sync(hwnd: HWND, text: Option<&str>, expect_seq
         let _ = CloseClipboard();
         return out;
     }
+    eprintln!("[clipboard] timeout phase=restore");
     log::warn!("剪贴板持续被占用，未还原备份");
     false
 }}
@@ -592,14 +608,20 @@ pub fn clipboard_selection(
             }
             send_ctrl_c();
 
-            // 轮询 GetClipboardSequenceNumber 10ms×300ms
-            let deadline = Instant::now() + Duration::from_millis(300);
+            // 一次富文本复制会连续发布多个格式；等序号稳定后再绑定，
+            // 否则把同次复制的后续格式误判为用户新复制的内容。
+            let deadline = Instant::now() + Duration::from_millis(400);
             let mut copied_seq = None;
+            let mut stable_since = Instant::now();
             while Instant::now() < deadline {
                 let seq_now = clip_seq();
                 if seq_now != snap.seq {
-                    copied_seq = Some(seq_now);
-                    break;
+                    if copied_seq != Some(seq_now) {
+                        copied_seq = Some(seq_now);
+                        stable_since = Instant::now();
+                    } else if stable_since.elapsed() >= Duration::from_millis(40) {
+                        break;
+                    }
                 }
                 thread::sleep(Duration::from_millis(10));
             }
@@ -894,7 +916,46 @@ fn capture_silent(
 
 #[cfg(test)]
 mod tests {
-    use super::elem_count;
+    use super::*;
+    use std::io::{BufRead, Read, Write};
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // 独立进程仅短暂持锁，不修改或输出剪贴板内容。
+    #[test]
+    #[ignore = "由剪贴板竞争测试作为子进程调用"]
+    fn clipboard_lock_holder() {
+        let hwnd = unsafe { clipboard_owner_hwnd().unwrap() };
+        unsafe { assert!(open_clipboard_with_retry(Some(hwnd))); }
+        println!("clipboard-lock-acquired");
+        std::io::stdout().flush().unwrap();
+        let _ = std::io::stdin().read_exact(&mut [0]);
+        thread::sleep(Duration::from_millis(150));
+        unsafe {
+            CloseClipboard().unwrap();
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
+
+    #[test]
+    fn clipboard_contention_waits_and_stale_reads_are_rejected() {
+        let mut holder = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::clipboard_lock_holder", "--ignored", "--nocapture"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut output = std::io::BufReader::new(holder.stdout.take().unwrap());
+        let ready = output.by_ref().lines()
+            .any(|line| line.is_ok_and(|line| line.contains("clipboard-lock-acquired")));
+        assert!(ready);
+        // 子进程确认持锁后再释放；原先 15ms 重试会在这里失败。
+        holder.stdin.take().unwrap().write_all(b"release").unwrap();
+        let snapshot = unsafe { clipboard_backup_snapshot() };
+        assert!(holder.wait().unwrap().success());
+        assert!(snapshot.ok, "短暂占用结束后应能读取快照");
+        let seq = clip_seq();
+        unsafe { assert!(clipboard_text(Some(seq.wrapping_sub(1))).is_none()); }
+        assert_eq!(clip_seq(), seq, "检查过程不应改写剪贴板");
+    }
 
     #[test]
     fn 空safearray的ubound负一不溢出() {

@@ -126,6 +126,7 @@ body {
 
 /* 回答排版：表格/代码独立横向滚动，不撑宽弹窗；颜色跟随主题。 */
 .markdown-content {
+  container: answer / inline-size;
   min-width: 0;
   line-height: 1.75;
   overflow-wrap: anywhere;
@@ -184,3 +185,27 @@ html.dark .markdown-content { color-scheme: dark; }
 }
 .markdown-content th { background: var(--field); font-weight: 600; text-align: left; }
 .markdown-content tbody tr:nth-child(even) { background: var(--bg-elevated); }
+
+/* 多列表格在窄回答区逐条展示列名与内容，宽窗口保留表格。 */
+@container answer (max-width: 36rem) {
+  .markdown-content table[data-wide="true"] { display: block; width: 100%; min-width: 0; }
+  table[data-wide="true"] thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  table[data-wide="true"] tbody { display: block; }
+  table[data-wide="true"] tbody tr { display: block; margin-block: 0.6em; border: 1px solid var(--border); }
+  table[data-wide="true"] td {
+    display: block;
+    min-width: 0;
+    max-width: none;
+    border: 0;
+    text-align: left !important;
+  }
+  table[data-wide="true"] td + td { border-top: 1px solid var(--line); }
+  table[data-wide="true"] td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.15em;
+    color: var(--muted);
+    font-size: 0.85em;
+    font-weight: 600;
+  }
+}

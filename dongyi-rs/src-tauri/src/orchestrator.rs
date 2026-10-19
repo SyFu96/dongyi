@@ -108,6 +108,20 @@ struct PopupSession {
     last_done: std::collections::HashMap<String, (String, String)>,
 }
 
+impl PopupSession {
+    /// 译文和解释共用当前原文；已有请求继续复用，失败后允许切回重试。
+    fn needs_tab_request(&mut self, kind: &str) -> bool {
+        if !matches!(kind, "translate" | "explain") || self.text.trim().is_empty() {
+            return false;
+        }
+        if self.failed.remove(kind) {
+            self.requested.remove(kind);
+        }
+        // 由 dispatch_request 登记 requested，避免提前登记吞掉请求。
+        !self.requested.contains(kind)
+    }
+}
+
 struct Ori {
     app: AppHandle,
     worker: CaptureWorker,
@@ -743,7 +757,6 @@ fn on_hotkey(ori: &SharedOri, kind: &str) {
             eprintln!("[hotkey] switch current popup kind={kind}");
             let _ = ori.app.emit("popup:tab", json!({ "kind": kind }));
             on_tab(ori, kind);
-            if kind == "translate" { dispatch_request(ori, kind); }
         } else {
             eprintln!("[hotkey] skipped kind={kind} reason=own-ui-or-empty-source");
         }
@@ -1045,25 +1058,14 @@ fn foreground_is_self() -> bool {
 
 // ---------------------------------------------------------------- P3：LLM 事件处理
 
-/// 前端切标签：解释惰性请求触发点（Python on_switched → _dispatch）；
+/// 前端切标签：译文/解释按需请求，共用当前会话原文；
 /// 追问/输入标签需要真实键盘 → 焦点开合（坑 8 的 Rust 版动态激活）。
 fn on_tab(ori: &SharedOri, kind: &str) {
     let interactive = matches!(kind, "chat" | "input");
     let _ = set_popup_focusable(ori, interactive);
-    if kind == "explain" {
-        let mut s = ori.session.lock().unwrap();
-        // RR4：上次失败 → 清标记允许重发；未请求过 → 正常惰性派发。
-        // 注意：不能在这里 pre-insert requested——dispatch_request 自带去重，
-        // 先插会被吞掉（回归：解释永无输出），只做条件判断+清理。
-        if s.failed.contains("explain") {
-            s.failed.remove("explain");
-            s.requested.remove("explain");
-        }
-        let should_request = !s.requested.contains("explain");
-        drop(s);
-        if should_request {
-            dispatch_request(ori, "explain"); // insert/检索/绑定都由它完成
-        }
+    let should_request = ori.session.lock().unwrap().needs_tab_request(kind);
+    if should_request {
+        dispatch_request(ori, kind);
     }
 }
 
@@ -1490,4 +1492,48 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
         }
     }
     let _ = ori.app.emit("llm:event", llm_event_json(&ev));
+}
+
+#[cfg(test)]
+mod tab_switch_tests {
+    use super::PopupSession;
+
+    #[test]
+    fn both_tab_orders_request_missing_result_and_reuse_existing_requests() {
+        for [first, second] in [["explain", "translate"], ["translate", "explain"]] {
+            let mut session = PopupSession { text: "Existing selection".into(), ..Default::default() };
+            // 初次打开已提交首个请求，切换时无需重新划词。
+            session.requested.insert(first.into());
+            assert!(session.needs_tab_request(second), "{first} -> {second}");
+            assert!(!session.requested.contains(second), "分发前不能占用去重标记");
+            session.requested.insert(second.into());
+            assert!(!session.needs_tab_request(first));
+            assert!(!session.needs_tab_request(second));
+            assert_eq!(session.text, "Existing selection");
+        }
+    }
+
+    #[test]
+    fn failed_tab_can_retry_without_invalidating_other_result() {
+        for kind in ["translate", "explain"] {
+            let other = if kind == "translate" { "explain" } else { "translate" };
+            let mut session = PopupSession { text: "Existing selection".into(), ..Default::default() };
+            session.requested.extend([kind.into(), other.into()]);
+            session.failed.insert(kind.into());
+            assert!(session.needs_tab_request(kind));
+            assert!(!session.failed.contains(kind));
+            assert!(!session.needs_tab_request(other));
+        }
+    }
+
+    #[test]
+    fn empty_source_and_interactive_tabs_do_not_start_requests() {
+        let mut session = PopupSession::default();
+        assert!(!session.needs_tab_request("translate"));
+        assert!(!session.needs_tab_request("explain"));
+        session.text = "Existing selection".into();
+        assert!(!session.needs_tab_request("chat"));
+        assert!(!session.needs_tab_request("input"));
+        assert!(session.requested.is_empty());
+    }
 }
