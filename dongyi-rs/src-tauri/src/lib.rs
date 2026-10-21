@@ -255,6 +255,11 @@ fn llm_retry(app: AppHandle, kind: String) {
 }
 
 #[tauri::command]
+fn translate_again(app: AppHandle, mode: String) {
+    send_orchestrator_ev(&app, orchestrator::AppEvent::Retranslate { mode });
+}
+
+#[tauri::command]
 fn llm_stop(app: AppHandle, kind: String) {
     send_orchestrator_ev(&app, orchestrator::AppEvent::Stop { kind });
 }
@@ -310,6 +315,7 @@ pub fn run() {
             tm_save,
             set_domain,
             llm_retry,
+            translate_again,
             llm_stop,
             set_input_provider,
             set_kind_provider,

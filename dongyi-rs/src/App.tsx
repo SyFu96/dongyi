@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { CopyAnswer, MarkdownContent } from "./MarkdownContent";
+import { CopyAnswer, MarkdownContent, SearchSources, type SearchSource } from "./MarkdownContent";
 
 type View = "popup" | "settings" | "icon";
 
@@ -29,18 +29,24 @@ export interface OpenPayload {
 type LlmMsg =
   | { type: "pending"; kind: string; req_id: number }
   | { type: "chunk"; kind: string; delta: string; req_id: number }
-  | { type: "finished"; kind: string; full_text: string; secs: number; truncated: boolean; req_id: number }
-  | { type: "failed"; kind: string; error: string; req_id: number };
+  | { type: "finished"; kind: string; full_text: string; secs: number; truncated: boolean; finish_reason?: string; req_id: number; sources?: SearchSource[] }
+  | { type: "failed"; kind: string; error: string; req_id: number; full_text?: string };
+
+type TranslationMode = "local" | "search" | "cloud";
 
 type Status = "idle" | "searching" | "pending" | "done" | "failed" | "stopped";
 interface ResultState {
   text: string;
+  sources?: SearchSource[];
   status: Status;
   error?: string;
   secs?: number;
   retryable?: boolean;
-  truncated?: boolean; // 流被截断（EOF 无终止行），状态区标注"可能不完整"
+  truncated?: boolean;
+  finish_reason?: string;
 }
+
+interface ChatMessage { role: string; text: string; sources?: SearchSource[]; truncated?: boolean; finish_reason?: string }
 
 const TABS = [
   { key: "translate", label: "译文", num: "01", color: "var(--color-accent)" },
@@ -189,7 +195,7 @@ function PopupView() {
   const [truncated, setTruncated] = useState(false);
   const [provider, setProvider] = useState("…");
   const [results, setResults] = useState<Partial<Record<TabKey, ResultState>>>({});
-  const [chat, setChat] = useState<{ role: string; text: string }[]>([]);
+  const [chat, setChat] = useState<ChatMessage[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [pinned, setPinned] = useState(false);
   // 输入翻译的后端选择与模型名（用户需求：本地默认，可在输入处随时切换）
@@ -200,6 +206,7 @@ function PopupView() {
   // P5：领域（学科）下拉与切换反馈
   const [domains, setDomains] = useState<{ id: string; label: string }[]>([]);
   const [activeDomain, setActiveDomain] = useState("");
+  const [translationMode, setTranslationMode] = useState<TranslationMode>("local");
   const [tmMsg, setTmMsg] = useState("");
 
   // chunk 缓冲 + rAF 批刷（30ms 语义等价 Python 版批量 append）
@@ -284,6 +291,7 @@ function PopupView() {
     };
 
     reg<OpenPayload>("popup:open", (p) => {
+      setTranslationMode("local");
       setSource(p.text);
       setKind(p.kind);
       setTruncated(p.truncated);
@@ -338,14 +346,14 @@ function PopupView() {
             const copy = [...c];
             const last = copy[copy.length - 1];
             if (last && last.role === "assistant") {
-              copy[copy.length - 1] = { ...last, text: m.full_text };
+              copy[copy.length - 1] = { ...last, text: m.full_text, sources: m.sources ?? [], truncated: m.truncated, finish_reason: m.finish_reason };
             }
             return copy;
           });
           // 追问完成也回填 results.chat（原缺陷：完成后仍显示请求中）
-          setResults((p) => ({ ...p, [k]: { text: m.full_text, status: "done", secs: m.secs, truncated: m.truncated } }));
+          setResults((p) => ({ ...p, [k]: { text: m.full_text, sources: m.sources ?? [], status: "done", secs: m.secs, truncated: m.truncated, finish_reason: m.finish_reason } }));
         } else {
-          setResults((p) => ({ ...p, [k]: { text: m.full_text, status: "done", secs: m.secs, truncated: m.truncated } }));
+          setResults((p) => ({ ...p, [k]: { text: m.full_text, sources: m.sources ?? [], status: "done", secs: m.secs, truncated: m.truncated, finish_reason: m.finish_reason } }));
         }
       } else if (m.type === "failed") {
         // req_id=0 = 系统级提示（如 key 未配置）免检；active 未绑定（闸门拒绝，
@@ -357,7 +365,7 @@ function PopupView() {
         buffers.current[k] = "";
         setResults((p) => ({
           ...p,
-          [k]: { ...(p[k] ?? EMPTY), status: "failed", error: m.error },
+          [k]: { ...(p[k] ?? EMPTY), ...(m.full_text === undefined ? {} : { text: m.full_text }), status: "failed", error: m.error },
         }));
       }
     });
@@ -373,7 +381,7 @@ function PopupView() {
       }));
     });
 
-    reg<{ kind: string }>("llm:reset", (p) => {
+    reg<{ kind: string; idle?: boolean }>("llm:reset", (p) => {
       const k = p.kind as TabKey;
       if (k === "chat") {
         chatStreaming.current = false;
@@ -382,8 +390,10 @@ function PopupView() {
       }
       buffers.current[k] = "";
       activeReq.current[k] = undefined; // Gate 复审 RR4：reset 清绑定
-      setResults((prev) => ({ ...prev, [k]: { text: "", status: "pending" } }));
+      setResults((prev) => ({ ...prev, [k]: { text: "", status: p.idle ? "idle" : "pending" } }));
     });
+
+    reg<{ mode: TranslationMode }>("translation:mode", (p) => setTranslationMode(p.mode));
 
     // popup:tab：RR4 轻量切标签（输入热键在弹窗已开时），不清会话/结果
     reg<{ kind: string }>("popup:tab", (p) => {
@@ -489,6 +499,7 @@ function PopupView() {
       onKindProvider={(kind, p) => invoke("set_kind_provider", { kind, provider: p })}
       domains={domains}
       activeDomain={activeDomain}
+      translationMode={translationMode}
       onSetDomain={(id) => invoke("set_domain", { id })}
       onTmSave={(kind, translation) => invoke("tm_save", { kind, translation })}
       tmMsg={tmMsg}
@@ -519,6 +530,7 @@ function PopupCard({
   onKindProvider,
   domains,
   activeDomain,
+  translationMode,
   onSetDomain,
   onTmSave,
   tmMsg,
@@ -527,7 +539,7 @@ function PopupCard({
   truncated: boolean;
   provider: string;
   results: Partial<Record<TabKey, ResultState>>;
-  chat: { role: string; text: string }[];
+  chat: ChatMessage[];
   activeTab: string;
   onSwitchTab: (tab: (typeof TABS)[number]) => void;
   onAskChat: () => void;
@@ -544,6 +556,7 @@ function PopupCard({
   onKindProvider: (kind: string, p: "ollama" | "openai") => void;
   domains: { id: string; label: string }[];
   activeDomain: string;
+  translationMode: TranslationMode;
   onSetDomain: (id: string) => void;
   onTmSave: (kind: string, translation: string) => void;
   tmMsg: string;
@@ -551,7 +564,7 @@ function PopupCard({
   // footer 按当前 kind 显示 provider/模型（Gate 实测反馈：此前恒显全局 ollama）
   const kindMeta = (k: TabKey): { whom: string; name: string } => {
     const p =
-      k === "input" ? inputProvider : k === "chat" ? chatProvider : (provider === "openai" ? "openai" : "ollama");
+      k === "translate" ? (translationMode === "cloud" ? "openai" : "ollama") : k === "input" ? inputProvider : k === "chat" ? chatProvider : (provider === "openai" ? "openai" : "ollama");
     return {
       whom: p === "ollama" ? "本地" : "云端",
       name: p === "ollama" ? modelNames.local : modelNames.cloud,
@@ -597,7 +610,7 @@ function PopupCard({
             </button>
           );
         })}
-        {/* P5：领域（学科）切换下拉（通用恒首位；下次请求即生效） */}
+        {/* 切领域后，当前译文/解释自动重算；隐藏页签下次打开时重算。 */}
         <div className="flex-1 flex items-center justify-end gap-1 px-2">
           {tmMsg && <span className="text-[11px] text-ok normal-case tracking-normal mr-2">{tmMsg}</span>}
           <span className="micro-label text-muted hidden sm:block">学科</span>
@@ -627,7 +640,7 @@ function PopupCard({
             复制原文 ↗
           </button>
         </div>
-        <p className="px-3 pb-2 text-[13px] leading-relaxed whitespace-pre-wrap select-text">
+        <p className="px-3 pb-2 text-[13px] leading-relaxed whitespace-pre-wrap select-text max-h-[25vh] overflow-y-auto">
           {source}
         </p>
         {truncated && <div className="px-3 pb-2 text-[11px] text-muted">原文过长，已截断</div>}
@@ -660,6 +673,8 @@ function PopupCard({
           <ResultView
             tab={activeTab}
             state={results[activeTab === "解释" ? "explain" : "translate"] ?? EMPTY}
+            mode={translationMode}
+            canTranslate={!!source.trim()}
           />
         )}
       </main>
@@ -733,14 +748,15 @@ function PopupCard({
 }
 
 /** 结果区（译文/解释主体） */
-function ResultView({ tab, state }: { tab: string; state: ResultState }) {
+function ResultView({ tab, state, mode = "local", canTranslate = true }: { tab: string; state: ResultState; mode?: TranslationMode; canTranslate?: boolean }) {
   return (
     <div className="px-3 pt-2 pb-3">
+      {tab === "译文" && <TranslationActions mode={mode} busy={state.status === "pending" || state.status === "searching"} enabled={canTranslate} />}
       {tab === "解释" && state.text && (
         <div className="flex justify-end mb-2"><CopyAnswer text={state.text} /></div>
       )}
       <div className="text-sm leading-relaxed select-text min-h-[3rem]">
-        {state.status === "idle" || state.status === "pending" && state.text === "" ? (
+        {state.status === "searching" ? <span className="text-muted">正在搜索术语与背景资料…</span> : state.status === "idle" || state.status === "pending" && state.text === "" ? (
           <span className="text-muted">{tab === "译文" ? "翻译请求中…" : "解释请求中…"}</span>
         ) : (
           state.text ? (
@@ -748,6 +764,29 @@ function ResultView({ tab, state }: { tab: string; state: ResultState }) {
           ) : <span className="text-muted">…</span>
         )}
       </div>
+      {state.status === "failed" && <div role="alert" className="mt-2 border border-line p-2 text-[12px] text-error leading-relaxed">{state.error ?? "翻译失败，请重试。"}</div>}
+      {state.text && <SearchSources sources={state.sources} />}
+      {state.truncated && <IncompleteAnswer kind={tab === "解释" ? "explain" : "translate"} reason={state.finish_reason} />}
+    </div>
+  );
+}
+
+/** 切换方式立即重译；领域变化由后端沿用本次方式，避免另起一份原文。 */
+function TranslationActions({ mode, busy, enabled }: { mode: TranslationMode; busy: boolean; enabled: boolean }) {
+  return (
+    <div className="sticky top-0 z-[1] bg-bg flex flex-wrap items-center justify-end gap-2 pb-2 mb-2 border-b border-line">
+      <select aria-label="翻译方式" value={mode} disabled={!enabled}
+        title="切换方式会立即重译当前原文；云端模型可能计费"
+        className="bg-bg-elevated border border-line px-2 h-7 text-[12px] min-w-0 disabled:opacity-40"
+        onChange={(e) => invoke("translate_again", { mode: e.target.value })}>
+        <option value="local">本地模型</option>
+        <option value="search">联网搜索 · 本地模型</option>
+        <option value="cloud">联网翻译 · 云端模型</option>
+      </select>
+      <button disabled={!enabled || busy} onClick={() => invoke("translate_again", { mode })}
+        className="border border-line px-2 h-7 text-[12px] hover:border-border-strong disabled:opacity-40">
+        重新翻译
+      </button>
     </div>
   );
 }
@@ -780,23 +819,10 @@ function StatusMeta({ kind, state }: { kind: TabKey; state: ResultState }) {
     );
   }
   if (state.status === "done") {
+    if (state.truncated) return <span className="text-error">回答未完成</span>;
     return (
       <span className="text-ok">
         已完成 {state.secs?.toFixed(1)}s
-        {/* F4：EOF 无终止行 = 流被截断，明确提示可重试而非伪装成正常完成 */}
-        {state.truncated && (
-          <>
-            <span className="ml-2 text-error normal-case tracking-normal">
-              响应可能不完整（流被截断）
-            </span>
-            <button
-              className="ml-2 underline underline-offset-2"
-              onClick={() => invoke("llm_retry", { kind })}
-            >
-              重试
-            </button>
-          </>
-        )}
       </span>
     );
   }
@@ -805,13 +831,22 @@ function StatusMeta({ kind, state }: { kind: TabKey; state: ResultState }) {
   }
   return (
     <span className="flex items-center gap-2 text-error">
-      <span className="normal-case tracking-normal">{state.error ?? "失败"}</span>
+      <span className="normal-case tracking-normal">{kind === "translate" ? "翻译失败" : state.error ?? "失败"}</span>
       {state.retryable !== false && (
         <button className="underline underline-offset-2" onClick={() => invoke("llm_retry", { kind })}>
           重试
         </button>
       )}
     </span>
+  );
+}
+
+function IncompleteAnswer({ kind, reason, retryable = true }: { kind: TabKey; reason?: string; retryable?: boolean }) {
+  return (
+    <div role="alert" className="mt-2 border border-line p-2 text-[12px] text-error leading-relaxed">
+      {reason === "length" ? "回答未完成：已达到模型的上下文或输出长度上限。" : "回答未完成：连接在输出结束前中断。"}
+      {retryable && <button className="ml-2 underline underline-offset-2" onClick={() => invoke("llm_retry", { kind })}>重试</button>}
+    </div>
   );
 }
 
@@ -827,7 +862,7 @@ function ChatView({
   cloudKeyOk,
   onProvider,
 }: {
-  chat: { role: string; text: string }[];
+  chat: ChatMessage[];
   state: ResultState;
   draft: string;
   setDraft: (v: string) => void;
@@ -871,6 +906,8 @@ function ChatView({
               className="w-full min-w-0 bg-surface border border-line px-3 py-2 text-[13px] leading-relaxed select-text"
             >
               <MarkdownContent text={m.text} />
+              <SearchSources sources={m.sources} />
+              {m.truncated && <IncompleteAnswer kind="chat" reason={m.finish_reason} retryable={i === chat.length - 1} />}
               <div className="flex justify-end mt-2"><CopyAnswer text={m.text} /></div>
             </div>
           ),
@@ -1024,6 +1061,8 @@ function InputView({
         ) : (
           state.text || <span className="text-muted">译文将在此显示</span>
         )}
+        {state.text && <SearchSources sources={state.sources} />}
+        {state.truncated && <IncompleteAnswer kind="input" reason={state.finish_reason} />}
       </div>
     </div>
   );

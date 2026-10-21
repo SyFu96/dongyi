@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { isTauri } from "@tauri-apps/api/core";
@@ -59,24 +59,42 @@ const components: Components = {
       <table data-wide={node?.properties["data-wide"]}>{children}</table>
     </div>
   ),
-  a: ({ href, children }) => {
-    if (href?.startsWith("#")) return <a href={href}>{children}</a>;
-    if (!href || !/^https?:\/\//i.test(href)) return <span>{children}</span>;
-    return (
-      <a href={href} target="_blank" rel="noopener noreferrer" onClick={(e) => {
-        if (isTauri()) {
-          e.preventDefault();
-          // 资料链接交给系统浏览器，避免弹窗跳离应用。
-          void openUrl(href).catch(() => {});
-        }
-      }}>
-        {children}
-      </a>
-    );
-  },
+  a: ({ href, children }) => <ExternalLink href={href}>{children}</ExternalLink>,
   // 回答中的外部图片只显示说明，避免自动发起图片请求。
   img: ({ alt }) => <span className="text-muted">[图片：{alt || "无说明"}]</span>,
 };
+
+function ExternalLink({ href, children }: { href?: string; children: ReactNode }) {
+  if (href?.startsWith("#")) return <a href={href}>{children}</a>;
+  if (!href || !/^https?:\/\//i.test(href)) return <span>{children}</span>;
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" onClick={(e) => {
+      if (isTauri()) {
+        e.preventDefault();
+        // 资料链接交给系统浏览器，避免弹窗跳离应用。
+        void openUrl(href).catch(() => {});
+      }
+    }}>{children}</a>
+  );
+}
+
+export interface SearchSource { title: string; url: string }
+
+/** 独立于回答正文，既保留每轮来源，也不污染译文和翻译记忆。 */
+export function SearchSources({ sources = [] }: { sources?: SearchSource[] }) {
+  const links = sources.filter((source) => /^https?:\/\//i.test(source.url));
+  if (!links.length) return null;
+  return (
+    <aside aria-label="搜索来源" className="mt-3 pt-2 border-t border-line text-[12px] leading-relaxed">
+      <div className="text-muted mb-1">搜索来源</div>
+      <ol className="list-decimal pl-5 space-y-1">
+        {links.map((source) => <li key={source.url} className="break-words [overflow-wrap:anywhere] underline underline-offset-2">
+          <ExternalLink href={source.url}>{source.title || source.url}</ExternalLink>
+        </li>)}
+      </ol>
+    </aside>
+  );
+}
 
 /** 只渲染回答；原始文本仍用于复制与会话。历史气泡不随新 chunk 重解析。 */
 export const MarkdownContent = memo(function MarkdownContent({ text }: { text: string }) {

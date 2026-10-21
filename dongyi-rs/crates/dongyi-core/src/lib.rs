@@ -18,6 +18,7 @@ pub mod translation;
 /// 内置默认配置（与 Python 版 DEFAULTS 逐字段一致）。
 pub const DEFAULTS_JSON: &str = r#"{
   "provider": "ollama",
+  "num_ctx": 8192,
   "kind_providers": {},
   "offline": false,
   "base_url": "http://localhost:11434",

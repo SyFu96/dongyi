@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use dongyi_capture::{CaptureCfg, CaptureResult, CaptureWorker, Mode, Selection};
 use dongyi_llm::{LlmEngine, LlmEvent, LlmRequest};
+use dongyi_llm::search::SearchSource;
 use dongyi_trigger::{parse_hotkey, start as start_trigger, AttemptAction, HotkeySpec, TriggerEvent};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Position};
@@ -51,8 +52,10 @@ pub enum AppEvent {
     SetDomain { id: String },
     /// 失败重试
     Retry { kind: String },
+    /// 当前选区重译；模式仅作用于本次会话，不改全局后端。
+    Retranslate { mode: String },
     /// 检索完成回执（RR2：结果交回编排线程串行复查后才启动 LLM）
-    SearchDone { kind: String, context: String, sgen: u64, epoch_at_start: u64 },
+    SearchDone { kind: String, context: String, sources: Vec<SearchSource>, error: Option<String>, sgen: u64, epoch_at_start: u64 },
     /// 停止生成
     Stop { kind: String },
     /// 防抖到期（由计时线程转发：编排串行处理，消除检查-提交之间的 Esc 插队窗口）
@@ -77,14 +80,32 @@ pub struct Bridge(pub mpsc::Sender<AppEvent>);
 
 const ICON_SIZE: i32 = 24; // 浮标边长（与 Python 版一致）
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TranslationMode { Local, Search, Cloud }
+
+impl TranslationMode {
+    fn parse(mode: &str) -> Option<Self> {
+        match mode { "local" => Some(Self::Local), "search" => Some(Self::Search), "cloud" => Some(Self::Cloud), _ => None }
+    }
+    fn name(self) -> &'static str {
+        match self { Self::Local => "local", Self::Search => "search", Self::Cloud => "cloud" }
+    }
+    fn provider(self) -> &'static str {
+        if self == Self::Cloud { "openai" } else { "ollama" }
+    }
+}
+
 /// 弹窗会话（Python `_sel`/`_chat_history`/`request`集合化）
 #[derive(Default)]
 struct PopupSession {
+    active_kind: String,
+    translation_mode: Option<TranslationMode>,
     /// 弹窗对象的原文
     text: String,
     /// 追问历史 [(role, content)]，上限 24 条（Python 同款）
     chat_history: Vec<(String, String)>,
     last_question: Option<String>,
+    last_chat_finished: bool,
     last_input: Option<String>,
     /// 上次输入翻译目标语向（None=自动；重试回放用，Python _last_input 对组）
     last_target: Option<String>,
@@ -97,6 +118,8 @@ struct PopupSession {
     pinned: bool,
     /// kind → 当前绑定的 req_id（迟到事件过滤：req_id 不匹配即丢）
     req_seq: std::collections::HashMap<String, u64>,
+    /// 来源只属于检索后绑定的那次请求，不能串到重试或下一轮追问。
+    search_sources: std::collections::HashMap<String, (u64, Vec<SearchSource>)>,
     /// kind → 当前检索代次（RR2：Stop/重试作废旧检索）
     search_gen: std::collections::HashMap<String, u64>,
     /// 失败过的 kind（RR4：解释切回去时对失败部分自动重发）
@@ -109,6 +132,32 @@ struct PopupSession {
 }
 
 impl PopupSession {
+    /// 重译/换领域先撤销旧流、检索与记忆配对，迟到结果不能覆盖新结果。
+    fn invalidate(&mut self, kind: &str) {
+        self.requested.remove(kind);
+        self.failed.remove(kind);
+        self.req_seq.remove(kind);
+        self.search_gen.remove(kind);
+        self.search_sources.remove(kind);
+        self.pending_source.remove(kind);
+        self.last_done.remove(kind);
+    }
+
+    /// 重试替换上一次已结束的回答，避免把同个问题再次叠进上下文。
+    fn prepare_chat_retry(&mut self) {
+        if self.last_chat_finished {
+            self.chat_history.truncate(self.chat_history.len().saturating_sub(2));
+            self.last_chat_finished = false;
+        }
+    }
+
+    fn sources_for(&self, kind: &str, req_id: u64) -> &[SearchSource] {
+        match self.search_sources.get(kind) {
+            Some((bound, sources)) if *bound == req_id && self.req_seq.get(kind) == Some(&req_id) => sources,
+            _ => &[],
+        }
+    }
+
     /// 译文和解释共用当前原文；已有请求继续复用，失败后允许切回重试。
     fn needs_tab_request(&mut self, kind: &str) -> bool {
         if !matches!(kind, "translate" | "explain") || self.text.trim().is_empty() {
@@ -220,6 +269,7 @@ impl Ori {
         let cfg = self.cfg();
         let mut parts: Vec<String> = vec![base];
         if let Some((did, dom)) = dongyi_knowledge::domains::active(&cfg) {
+            parts.push(format!("当前领域：{}。按该领域语境选择术语与含义。", dom.name));
             let note = dongyi_knowledge::domains::note_text(&dom);
             if !note.is_empty() {
                 parts.push(note);
@@ -409,8 +459,14 @@ pub fn start(app: AppHandle, cfg: Value) {
                 Ok(AppEvent::SetDomain { id }) => on_set_domain(&ori, &id),
                 Ok(AppEvent::KbCheck) => maybe_refresh_kb(&ori),
                 Ok(AppEvent::Retry { kind }) => on_retry(&ori, &kind),
-                Ok(AppEvent::SearchDone { kind, context, sgen, epoch_at_start }) => {
-                    on_search_done(&ori, &kind, context, sgen, epoch_at_start)
+                Ok(AppEvent::Retranslate { mode }) => {
+                    if let Some(mode) = TranslationMode::parse(&mode) {
+                        ori.session.lock().unwrap().translation_mode = Some(mode);
+                        on_retry(&ori, "translate");
+                    }
+                }
+                Ok(AppEvent::SearchDone { kind, context, sources, error, sgen, epoch_at_start }) => {
+                    on_search_done(&ori, &kind, context, sources, error, sgen, epoch_at_start)
                 }
                 Ok(AppEvent::Stop { kind }) => on_stop(&ori, &kind),
                 Ok(AppEvent::Pin { on }) => on_pin(&ori, on),
@@ -461,8 +517,8 @@ fn llm_event_json(ev: &LlmEvent) -> Value {
     match ev {
         LlmEvent::Pending { req_id, kind } => json!({ "type": "pending", "kind": kind, "req_id": req_id }),
         LlmEvent::Chunk { kind, delta, req_id } => json!({ "type": "chunk", "kind": kind, "delta": delta, "req_id": req_id }),
-        LlmEvent::Finished { kind, full_text, secs, truncated, req_id } => json!({
-            "type": "finished", "kind": kind, "full_text": full_text, "secs": secs, "truncated": truncated, "req_id": req_id
+        LlmEvent::Finished { kind, full_text, secs, truncated, finish_reason, req_id } => json!({
+            "type": "finished", "kind": kind, "full_text": full_text, "secs": secs, "truncated": truncated, "finish_reason": finish_reason, "req_id": req_id
         }),
         LlmEvent::Failed { kind, error, req_id } => json!({ "type": "failed", "kind": kind, "error": error, "req_id": req_id }),
     }
@@ -471,7 +527,7 @@ fn llm_event_json(ev: &LlmEvent) -> Value {
 /// 向某 kind 发起 LLM 请求（requested 去重：解释惰性、同原文不重复请求）。
 /// 成功入队后把 req_id 绑进会话：该 kind 的迟到事件若代沟不匹配将被丢弃
 /// （用户实测"上次追问/输入的结果重新出现"的根因修复）。
-/// 解释按独立搜索配置检索；划词译文保持直接翻译。
+/// 解释按独立搜索配置检索；译文按本次会话选择直接/搜索/云端翻译。
 fn dispatch_request(ori: &SharedOri, kind: &str) {
     let (text, cfg) = {
         let mut s = ori.session.lock().unwrap();
@@ -483,7 +539,22 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
     if text.is_empty() {
         return;
     }
-    let provider = ori.provider_for(kind);
+    let provider = if kind == "translate" {
+        let mode = ori.session.lock().unwrap().translation_mode.unwrap_or_else(|| {
+            if ori.provider_for(kind) == "openai" { TranslationMode::Cloud } else { TranslationMode::Local }
+        });
+        let _ = ori.app.emit("translation:mode", json!({ "mode": mode.name() }));
+        if let Some(error) = translation_mode_error(mode, &cfg) {
+            translation_failed(ori, &error);
+            return;
+        }
+        if mode == TranslationMode::Search {
+            let query = translation_query(&text, &cfg);
+            search_then_request(ori.clone(), kind.to_owned(), query, cfg);
+            return;
+        }
+        mode.provider().to_owned()
+    } else { ori.provider_for(kind) };
     // P5：translate/explain 初始请求同样走统一组装链
     let sys = if kind == "translate" {
         ori.translation_system(kind, &text, None, "")
@@ -505,6 +576,29 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
             .pending_source
             .insert(kind.to_owned(), (rid, text));
     }
+}
+
+fn translation_mode_error(mode: TranslationMode, cfg: &Value) -> Option<String> {
+    if mode != TranslationMode::Local && cfg["offline"].as_bool().unwrap_or(false) {
+        return Some("当前为离线模式，请先关闭离线模式再联网翻译。".into());
+    }
+    if mode == TranslationMode::Search && dongyi_llm::search::api_key(&cfg["web_search"]).is_empty() {
+        return Some("联网搜索翻译需要搜索 key，请在设置的联网检索中填写。".into());
+    }
+    if mode == TranslationMode::Cloud && dongyi_llm::cloud_key_for(&cfg["cloud"]).is_empty() {
+        return Some("云端翻译需要云端模型 key，请在设置中填写。".into());
+    }
+    None
+}
+
+fn translation_query(text: &str, cfg: &Value) -> String {
+    let domain = dongyi_knowledge::domains::active(cfg).map(|(_, d)| d.name).unwrap_or_default();
+    format!("{domain} {} translation 术语", text.chars().take(600).collect::<String>())
+}
+
+fn translation_failed(ori: &Ori, error: &str) {
+    ori.session.lock().unwrap().failed.insert("translate".into());
+    let _ = ori.app.emit("llm:event", json!({ "type": "failed", "kind": "translate", "req_id": 0, "error": error }));
 }
 
 /// 检索 → 注入 → 请求（RR2 重构：结果交回编排线程，防"停止后复活/污染新会话"）：
@@ -534,22 +628,26 @@ fn search_then_request(ori: SharedOri, kind: String, query: String, cfg: Value) 
     thread::Builder::new()
         .name("dongyi-web-search".into())
         .spawn(move || {
-            let ctx = match dongyi_llm::search::web_search(&query, &cfg["web_search"]) {
-                Ok(list) => dongyi_llm::search::format_results(&list),
+            let (ctx, sources, error) = match dongyi_llm::search::web_search(&query, &cfg["web_search"]) {
+                Ok(list) => {
+                    let (ctx, sources) = dongyi_llm::search::prepare_results(&list);
+                    let error = ctx.is_empty().then(|| "没有找到可用的搜索资料。".to_owned());
+                    (ctx, sources, error)
+                },
                 Err(e) => {
                     // 失败回退模型自身知识（Python on_search_done err 分支同款）
                     eprintln!("[orch] search failed kind={kind2}: {e}");
-                    String::new()
+                    (String::new(), Vec::new(), Some(e))
                 }
             };
-            let _ = tx.send(AppEvent::SearchDone { kind: kind2, context: ctx, sgen, epoch_at_start });
+            let _ = tx.send(AppEvent::SearchDone { kind: kind2, context: ctx, sources, error, sgen, epoch_at_start });
         })
         .ok();
 }
 
 /// SearchDone 处理（编排串行）：sgen 未被 Stop/重试作废、epoch 未被关闭/新会话
 /// 推进，两者同时成立才注入 ctx 并启动请求；否则检索结果静默丢弃。
-fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch_at_start: u64) {
+fn on_search_done(ori: &SharedOri, kind: &str, context: String, sources: Vec<SearchSource>, error: Option<String>, sgen: u64, epoch_at_start: u64) {
     if ori.req_epoch.load(Ordering::SeqCst) != epoch_at_start {
         eprintln!("[orch] search late drop kind={kind} (epoch moved)");
         return;
@@ -565,6 +663,13 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
         eprintln!("[orch] search stale drop kind={kind} (sgen superseded)");
         return;
     }
+    // 用户主动选择了搜索翻译，检索失败必须说明，不能冒充联网成功。
+    if kind == "translate" {
+        if let Some(error) = error {
+            translation_failed(ori, &format!("联网搜索翻译失败：{error} 可重试或改用本地/云端翻译。"));
+            return;
+        }
+    }
     let (sel, target) = {
         let s = ori.session.lock().unwrap();
         if kind == "input" {
@@ -577,11 +682,11 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
         return;
     }
     // 重新组装消息（与发起时同构），注入 ctx 后 bind
-    let provider = ori.provider_for(kind);
-    let input_source = (kind == "input").then(|| sel.clone());
+    let provider = if kind == "translate" { "ollama".to_owned() } else { ori.provider_for(kind) };
+    let input_source = matches!(kind, "translate" | "input").then(|| sel.clone());
     let msg = match kind {
-        "input" => {
-            let sys = ori.translation_system("input", &sel, target.as_deref(), &context);
+        "translate" | "input" => {
+            let sys = ori.translation_system(kind, &sel, target.as_deref(), &context);
             vec![("system".into(), sys), ("user".into(), sel)]
         }
         "chat" => {
@@ -616,8 +721,9 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
         }
     };
     let rid = bind_request(ori, kind, LlmRequest::from_cfg(kind, msg, &ori.cfg()).with_provider(provider));
+    ori.session.lock().unwrap().search_sources.insert(kind.to_owned(), (rid, sources));
     if let Some(source) = input_source {
-        ori.session.lock().unwrap().pending_source.insert("input".into(), (rid, source));
+        ori.session.lock().unwrap().pending_source.insert(kind.into(), (rid, source));
     }
 }
 
@@ -625,11 +731,11 @@ fn on_search_done(ori: &SharedOri, kind: &str, context: String, sgen: u64, epoch
 /// 返回 req_id（调用方可登记「原文快照」用于 TM 配对，P5-M3）。
 fn bind_request(ori: &Ori, kind: &str, req: LlmRequest) -> u64 {
     let (ok, req_id) = ori.llm.request(req);
-    ori.session
-        .lock()
-        .unwrap()
-        .req_seq
-        .insert(kind.to_owned(), req_id);
+    {
+        let mut s = ori.session.lock().unwrap();
+        s.req_seq.insert(kind.to_owned(), req_id);
+        s.search_sources.remove(kind);
+    }
     if !ok {
         // 闸门拒绝（F2）：引擎已先取消同 kind 旧任务；多发 llm:reset 让前端
         // 撤掉旧绑定/缓冲，随后的 Failed 以"未绑定态"免检直达，必须可见
@@ -646,8 +752,11 @@ fn begin_session(ori: &Ori) {
     ori.llm.cancel(&["translate", "explain", "chat", "input"]);
     {
         let mut s = ori.session.lock().unwrap();
+        s.translation_mode = None;
+        s.active_kind.clear();
         s.chat_history.clear();
         s.last_question = None;
+        s.last_chat_finished = false;
         s.last_translation = None;
         s.last_explanation = None;
         s.last_input = None;
@@ -656,6 +765,7 @@ fn begin_session(ori: &Ori) {
         s.last_done.clear();
         s.requested.clear();
         s.req_seq.clear();
+        s.search_sources.clear();
         s.search_gen.clear();
         s.failed.clear();
     }
@@ -992,7 +1102,11 @@ fn open_popup(ori: &SharedOri, sel: Selection, kind: String) {
     let text_len = text.chars().count();
     // 新弹窗会话——统一入口（Gate P3-B2）：取消全部在飞流 + 清会话
     begin_session(ori);
-    ori.session.lock().unwrap().text = text;
+    {
+        let mut s = ori.session.lock().unwrap();
+        s.text = text;
+        s.active_kind = kind.clone();
+    }
     dispatch_request(ori, &kind);
     // P5 诊断：后端视野里的领域清单（弹窗下拉数据源）
     let doms: Vec<String> = dongyi_knowledge::domains::enabled(&ori.cfg())
@@ -1040,6 +1154,7 @@ fn open_input_translation(ori: &SharedOri) {
         // 已开：轻量切标签，不清会话/结果（Python show_input_tab 同语义）
         let _ = ori.app.emit("popup:tab", json!({ "kind": "input" }));
     }
+    ori.session.lock().unwrap().active_kind = "input".into();
     reveal_popup(ori, true);
 }
 
@@ -1061,6 +1176,8 @@ fn foreground_is_self() -> bool {
 /// 前端切标签：译文/解释按需请求，共用当前会话原文；
 /// 追问/输入标签需要真实键盘 → 焦点开合（坑 8 的 Rust 版动态激活）。
 fn on_tab(ori: &SharedOri, kind: &str) {
+    if !matches!(kind, "translate" | "explain" | "chat" | "input") { return; }
+    ori.session.lock().unwrap().active_kind = kind.to_owned();
     let interactive = matches!(kind, "chat" | "input");
     let _ = set_popup_focusable(ori, interactive);
     let should_request = ori.session.lock().unwrap().needs_tab_request(kind);
@@ -1080,6 +1197,7 @@ fn on_chat_ask(ori: &SharedOri, question: &str, translation: &str, explanation: 
             return;
         }
         s.last_question = Some(question.clone());
+        s.last_chat_finished = false;
         s.last_translation = Some(translation.to_owned());
         s.last_explanation = Some(explanation.to_owned());
         s.search_gen.remove("chat"); // 新问题使旧检索失效，即使本次已关闭搜索。
@@ -1145,17 +1263,19 @@ fn on_input_ask(ori: &SharedOri, text: &str, target: &str) {
 
 /// 失败重试（Python on_retry）。
 fn on_retry(ori: &SharedOri, kind: &str) {
+    ori.llm.cancel(&[kind]);
+    ori.session.lock().unwrap().invalidate(kind);
     // 清"重试旧位"：前端把该 kind 结果清空再等新事件
     let _ = ori.app.emit("llm:reset", json!({ "kind": kind }));
     match kind {
         "translate" | "explain" => {
             // 重新入队该 kind（requested 允许覆盖）
-            ori.session.lock().unwrap().requested.remove(kind);
             dispatch_request(ori, kind);
         }
         "chat" => {
             let (q, tr, ex) = {
-                let s = ori.session.lock().unwrap();
+                let mut s = ori.session.lock().unwrap();
+                s.prepare_chat_retry();
                 (
                     s.last_question.clone(),
                     s.last_translation.clone(),
@@ -1234,7 +1354,7 @@ fn on_tm_save(ori: &Ori, kind: &str, translation: Option<String>) {
 /// P5：切换激活领域（Gate P5-M2：与 save_config_paths/on_kind_provider 相同——
 /// **同一把锁内**校验→候选→写盘→发布，杜绝旧快照覆盖并发成功配置；
 /// 以 cfg 为唯一激活真源，不设额外内存缓存）。
-/// 裁切：托盘学科子菜单不做，弹窗顶栏下拉切换（下次请求即生效）。
+/// 弹窗顶栏切换后，作废旧结果并重算当前译文/解释。
 fn on_set_domain(ori: &SharedOri, id: &str) {
     let (new_id, name) = {
         let state = ori.app.state::<SharedCfg>();
@@ -1275,6 +1395,20 @@ fn on_set_domain(ori: &SharedOri, id: &str) {
     );
     eprintln!("[orch] set_domain ok id={new_id}");
     let _ = ori.app.emit("domain:changed", json!({ "id": new_id, "name": name }));
+    // 隐藏页签惰性重算；当前译文/解释立即按新领域重跑，不必重新划词。
+    let active = ori.session.lock().unwrap().active_kind.clone();
+    ori.llm.cancel(&["translate", "explain"]);
+    for kind in ["translate", "explain"] {
+        ori.session.lock().unwrap().invalidate(kind);
+        let _ = ori.app.emit("llm:reset", json!({ "kind": kind, "idle": true }));
+    }
+    if ori.popup().is_some_and(|w| w.is_visible().unwrap_or(false)) {
+        if matches!(active.as_str(), "translate" | "explain") {
+            on_retry(ori, &active);
+        } else if active == "input" && ori.session.lock().unwrap().last_input.is_some() {
+            on_retry(ori, "input");
+        }
+    }
 }
 
 /// P5：知识库目录并集签名 → 变化才后台增量刷新（Python _maybe_refresh_kb 状态机版）。
@@ -1461,6 +1595,22 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
         eprintln!("[orch] drop stale llm event kind={kind} req={req_id} (current={current:?})");
         return;
     }
+    if let LlmEvent::Finished { full_text, truncated: false, .. } = &ev {
+        let mut s = ori.session.lock().unwrap();
+        let target = if kind == "input" { s.last_target.as_deref() } else { None };
+        let unchanged = matches!(kind.as_str(), "translate" | "input")
+            && s.pending_source.get(&kind).is_some_and(|(_, source)| dongyi_core::translation::unchanged_english(source, full_text, target));
+        if unchanged {
+            s.failed.insert(kind.clone());
+            s.pending_source.remove(&kind);
+            s.last_done.remove(&kind);
+            drop(s);
+            eprintln!("[orch] untranslated English kind={kind} req={req_id}");
+            let _ = ori.app.emit("llm:event", json!({ "type": "failed", "kind": kind, "req_id": req_id,
+                "full_text": full_text, "error": "模型原样返回了英文，尚未完成翻译。请重新翻译，或选择联网搜索/云端翻译。" }));
+            return;
+        }
+    }
     // chat 完成维护追问历史（Python 侧用户提供 popup 文本；引擎直接可得全文）
     if let LlmEvent::Finished { full_text, .. } = &ev {
         // P5-M3：仅当与「该 kind 进行中请求的原文快照」配对成功才登记
@@ -1478,6 +1628,7 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
             if let Some(q) = s.last_question.clone() {
                 s.chat_history.push(("user".into(), q));
                 s.chat_history.push(("assistant".into(), full_text.clone()));
+                s.last_chat_finished = true;
                 if s.chat_history.len() > 24 {
                     let cut = s.chat_history.len() - 24;
                     s.chat_history.drain(..cut);
@@ -1491,12 +1642,104 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
             ori.session.lock().unwrap().failed.insert(kind.clone());
         }
     }
-    let _ = ori.app.emit("llm:event", llm_event_json(&ev));
+    let mut payload = llm_event_json(&ev);
+    if matches!(&ev, LlmEvent::Finished { .. }) {
+        payload["sources"] = json!(ori.session.lock().unwrap().sources_for(&kind, req_id));
+    }
+    let _ = ori.app.emit("llm:event", payload);
 }
 
 #[cfg(test)]
 mod tab_switch_tests {
-    use super::PopupSession;
+    use super::{PopupSession, TranslationMode, translation_mode_error, translation_query};
+
+    #[test]
+    fn manual_translation_modes_use_chosen_provider_and_respect_offline() {
+        let mut cfg = serde_json::json!({
+            "offline": false, "provider": "openai",
+            "cloud": {"api_key": "test-cloud", "api_key_env":"DONGYI_TEST_MISSING_KEY"},
+            "web_search": {"enabled": false, "api_key": "test-search", "kinds": {"translate": false}}
+        });
+        for (name, provider) in [("local", "ollama"), ("search", "ollama"), ("cloud", "openai")] {
+            let mode = TranslationMode::parse(name).unwrap();
+            assert_eq!(mode.provider(), provider);
+            assert!(translation_mode_error(mode, &cfg).is_none());
+            cfg["offline"] = serde_json::json!(true);
+            assert_eq!(translation_mode_error(mode, &cfg).is_some(), name != "local");
+            cfg["offline"] = serde_json::json!(false);
+        }
+        assert!(TranslationMode::parse("invalid").is_none());
+        cfg["cloud"]["api_key"] = serde_json::json!("");
+        assert!(translation_mode_error(TranslationMode::Cloud, &cfg).unwrap().contains("key"));
+        // 显式点击可单次搜索，不改自动检索开关或全局后端。
+        assert_eq!(cfg["web_search"]["enabled"], false);
+        assert_eq!(cfg["provider"], "openai");
+    }
+
+    #[test]
+    fn retranslation_invalidates_old_stream_search_and_memory_pair_but_keeps_source_and_mode() {
+        let mut session = PopupSession { text: "Original selection".into(), translation_mode: Some(TranslationMode::Search), ..Default::default() };
+        session.requested.extend(["translate".into(), "explain".into()]);
+        session.req_seq.extend([("translate".into(), 10), ("explain".into(), 20)]);
+        session.search_gen.insert("translate".into(), 30);
+        session.pending_source.insert("translate".into(), (10, "Original selection".into()));
+        session.last_done.insert("translate".into(), ("Old selection".into(), "Old answer".into()));
+        session.failed.insert("translate".into());
+        session.invalidate("translate");
+        assert!(session.req_seq.get("translate").is_none());
+        assert!(session.search_gen.get("translate").is_none());
+        assert!(session.pending_source.get("translate").is_none());
+        assert!(session.last_done.get("translate").is_none());
+        assert!(session.needs_tab_request("translate"));
+        assert!(!session.needs_tab_request("explain"));
+        assert_eq!(session.req_seq.get("explain"), Some(&20));
+        assert_eq!(session.text, "Original selection");
+        assert!(session.translation_mode == Some(TranslationMode::Search));
+    }
+
+    #[test]
+    fn translation_search_query_uses_current_domain_and_bounds_original_text() {
+        let mut cfg = serde_json::json!({"active_domain":"battery", "domains": {
+            "battery":{"name":"电池/能源"}, "network":{"name":"通信网络"}
+        }});
+        assert!(translation_query("cell", &cfg).starts_with("电池/能源 cell"));
+        cfg["active_domain"] = serde_json::json!("network");
+        assert!(translation_query("cell", &cfg).starts_with("通信网络 cell"));
+        assert!(translation_query(&"字".repeat(3000), &cfg).chars().count() < 650);
+    }
+
+    #[test]
+    fn retry_replaces_finished_pair_without_erasing_earlier_dialogue() {
+        let mut session = PopupSession::default();
+        session.chat_history = vec![
+            ("user".into(), "earlier question".into()), ("assistant".into(), "earlier answer".into()),
+            ("user".into(), "current question".into()), ("assistant".into(), "partial answer".into()),
+        ];
+        session.last_chat_finished = true;
+        session.prepare_chat_retry();
+        assert_eq!(session.chat_history.len(), 2);
+        assert_eq!(session.chat_history[1].1, "earlier answer");
+        session.prepare_chat_retry();
+        assert_eq!(session.chat_history.len(), 2);
+    }
+
+    #[test]
+    fn search_sources_are_bound_to_current_request_and_kind() {
+        let mut session = PopupSession::default();
+        let source = super::SearchSource { title: "Guide".into(), url: "https://example.com/guide".into() };
+        session.req_seq.insert("chat".into(), 11);
+        session.search_sources.insert("chat".into(), (11, vec![source.clone()]));
+        assert_eq!(session.sources_for("chat", 11), &[source.clone()]);
+        assert!(session.sources_for("explain", 11).is_empty());
+        // 新问题/重试绑定后，上一轮来源不能冒充本轮；停止后同样失效。
+        session.req_seq.insert("chat".into(), 12);
+        assert!(session.sources_for("chat", 12).is_empty());
+        assert!(session.sources_for("chat", 11).is_empty());
+        session.search_sources.insert("chat".into(), (12, vec![source]));
+        assert_eq!(session.sources_for("chat", 12).len(), 1);
+        session.req_seq.remove("chat");
+        assert!(session.sources_for("chat", 12).is_empty());
+    }
 
     #[test]
     fn both_tab_orders_request_missing_result_and_reuse_existing_requests() {
