@@ -11,6 +11,7 @@
 | WebView2 (Microsoft Edge WebView2 Runtime) | 系统组件 | Microsoft 专有许可（随 Windows 分发） |
 | React / react-dom | 19.x | MIT |
 | react-markdown / remark-gfm（含 unified / remark / rehype 依赖） | 10.x / 4.x | MIT（详见随附聚合许可） |
+| remark-math / rehype-katex / KaTeX | 6.x / 7.x / 0.16.x | MIT（详见随附聚合许可） |
 | @tauri-apps/api | 2.x | MIT 或 Apache-2.0 |
 
 ## Rust 依赖（主要）

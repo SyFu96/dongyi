@@ -207,6 +207,7 @@ function PopupView() {
   const [domains, setDomains] = useState<{ id: string; label: string }[]>([]);
   const [activeDomain, setActiveDomain] = useState("");
   const [translationMode, setTranslationMode] = useState<TranslationMode>("local");
+  const [explainFallback, setExplainFallback] = useState(false);
   const [tmMsg, setTmMsg] = useState("");
 
   // chunk 缓冲 + rAF 批刷（30ms 语义等价 Python 版批量 append）
@@ -291,6 +292,7 @@ function PopupView() {
     };
 
     reg<OpenPayload>("popup:open", (p) => {
+      setExplainFallback(false);
       setTranslationMode("local");
       setSource(p.text);
       setKind(p.kind);
@@ -383,6 +385,7 @@ function PopupView() {
 
     reg<{ kind: string; idle?: boolean }>("llm:reset", (p) => {
       const k = p.kind as TabKey;
+      if (k === "explain") setExplainFallback(false);
       if (k === "chat") {
         chatStreaming.current = false;
         // 重试替换上一段未完成回答，保留原问题与更早的对话。
@@ -394,6 +397,7 @@ function PopupView() {
     });
 
     reg<{ mode: TranslationMode }>("translation:mode", (p) => setTranslationMode(p.mode));
+    reg("explain:fallback", () => setExplainFallback(true));
 
     // popup:tab：RR4 轻量切标签（输入热键在弹窗已开时），不清会话/结果
     reg<{ kind: string }>("popup:tab", (p) => {
@@ -500,6 +504,7 @@ function PopupView() {
       domains={domains}
       activeDomain={activeDomain}
       translationMode={translationMode}
+      explainFallback={explainFallback}
       onSetDomain={(id) => invoke("set_domain", { id })}
       onTmSave={(kind, translation) => invoke("tm_save", { kind, translation })}
       tmMsg={tmMsg}
@@ -531,6 +536,7 @@ function PopupCard({
   domains,
   activeDomain,
   translationMode,
+  explainFallback,
   onSetDomain,
   onTmSave,
   tmMsg,
@@ -557,6 +563,7 @@ function PopupCard({
   domains: { id: string; label: string }[];
   activeDomain: string;
   translationMode: TranslationMode;
+  explainFallback: boolean;
   onSetDomain: (id: string) => void;
   onTmSave: (kind: string, translation: string) => void;
   tmMsg: string;
@@ -564,7 +571,7 @@ function PopupCard({
   // footer 按当前 kind 显示 provider/模型（Gate 实测反馈：此前恒显全局 ollama）
   const kindMeta = (k: TabKey): { whom: string; name: string } => {
     const p =
-      k === "translate" ? (translationMode === "cloud" ? "openai" : "ollama") : k === "input" ? inputProvider : k === "chat" ? chatProvider : (provider === "openai" ? "openai" : "ollama");
+      k === "translate" ? (translationMode === "cloud" ? "openai" : "ollama") : k === "input" ? inputProvider : k === "chat" ? chatProvider : k === "explain" && explainFallback ? "openai" : (provider === "openai" ? "openai" : "ollama");
     return {
       whom: p === "ollama" ? "本地" : "云端",
       name: p === "ollama" ? modelNames.local : modelNames.cloud,
@@ -675,6 +682,7 @@ function PopupCard({
             state={results[activeTab === "解释" ? "explain" : "translate"] ?? EMPTY}
             mode={translationMode}
             canTranslate={!!source.trim()}
+            explainFallback={explainFallback}
           />
         )}
       </main>
@@ -748,9 +756,10 @@ function PopupCard({
 }
 
 /** 结果区（译文/解释主体） */
-function ResultView({ tab, state, mode = "local", canTranslate = true }: { tab: string; state: ResultState; mode?: TranslationMode; canTranslate?: boolean }) {
+function ResultView({ tab, state, mode = "local", canTranslate = true, explainFallback = false }: { tab: string; state: ResultState; mode?: TranslationMode; canTranslate?: boolean; explainFallback?: boolean }) {
   return (
     <div className="px-3 pt-2 pb-3">
+      {tab === "解释" && explainFallback && <div role="status" className="mb-2 text-[12px] text-muted">本地解释超过 1 分钟无输出，已切换云端模型。</div>}
       {tab === "译文" && <TranslationActions mode={mode} busy={state.status === "pending" || state.status === "searching"} enabled={canTranslate} />}
       {tab === "解释" && state.text && (
         <div className="flex justify-end mb-2"><CopyAnswer text={state.text} /></div>

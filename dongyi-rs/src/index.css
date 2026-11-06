@@ -137,6 +137,7 @@ html.dark .markdown-content { color-scheme: dark; }
 .markdown-content > :first-child { margin-top: 0; }
 .markdown-content > :last-child { margin-bottom: 0; }
 .markdown-content p { white-space: pre-wrap; }
+.markdown-content .katex-display { overflow-x: auto; overflow-y: hidden; padding-block: 0.25em; }
 .markdown-content :is(h1, h2, h3, h4, h5, h6) {
   margin-top: 1.1em;
   font-weight: 700;

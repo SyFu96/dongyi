@@ -1,12 +1,31 @@
 import { memo, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Element, Nodes, Root } from "hast";
 
-const plugins = [remarkGfm];
-const htmlPlugins = [labelTableCells];
+const plugins = [remarkGfm, remarkMath, preserveCurrency];
+const htmlPlugins = [labelTableCells, rehypeKatex];
+
+/** 避免两个金额之间的美元符号被误当成行内公式。 */
+function preserveCurrency() {
+  type Node = { type: string; value?: string; data?: unknown; children?: Node[] };
+  const visit = (node: Node) => {
+    if (!node.children) return;
+    for (const child of node.children) {
+      if (child.type === "inlineMath" && child.value && /^\d[\d,.]*(?:\s+|(?=[\u4e00-\u9fff]))/.test(child.value)
+        && /[\u4e00-\u9fff]|[a-zA-Z]{2,}/.test(child.value)) {
+        child.type = "text";
+        child.value = `$${child.value}$`;
+        delete child.data;
+      } else visit(child);
+    }
+  };
+  return visit;
+}
 
 /** 只修复可明确识别的分隔行；原文、普通竖线文本和代码保持不变。 */
 export function repairTableSeparators(text: string): string {

@@ -17,6 +17,14 @@ const modulePath = path.join(out, "MarkdownContent.mjs");
 await fs.writeFile(modulePath, compiled);
 const { MarkdownContent, repairTableSeparators } = await import(pathToFileURL(modulePath).href);
 const render = text => renderToStaticMarkup(createElement(MarkdownContent, { text }));
+const formula = render('在 $t_0 + 15.9s$ 时启动，计算 $\\frac{a}{b}$。\n\n$$\nx^2 + y^2 = z^2\n$$');
+assert.equal((formula.match(/class="katex"/g) ?? []).length, 3);
+assert.match(formula, /<msub>/);
+assert.match(formula, /<mfrac>/);
+assert.match(formula, /katex-display/);
+assert.match(render('价格从 $5 增加到 $10。'), /\$5 增加到 \$10/);
+assert.match(render('价格从 $5 and $10。'), /\$5 and \$10/);
+assert.doesNotMatch(render('`$t_0$`'), /class="katex"/);
 
 const text = [
   "## 两类电池的区别", "", "**先看结论：** 应结合应用场景选择。", "",

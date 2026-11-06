@@ -52,6 +52,7 @@ pub enum AppEvent {
     SetDomain { id: String },
     /// 失败重试
     Retry { kind: String },
+    ExplainTimeout { generation: u64 },
     /// 当前选区重译；模式仅作用于本次会话，不改全局后端。
     Retranslate { mode: String },
     /// 检索完成回执（RR2：结果交回编排线程串行复查后才启动 LLM）
@@ -98,6 +99,7 @@ impl TranslationMode {
 /// 弹窗会话（Python `_sel`/`_chat_history`/`request`集合化）
 #[derive(Default)]
 struct PopupSession {
+    explain_watch: Option<u64>,
     active_kind: String,
     translation_mode: Option<TranslationMode>,
     /// 弹窗对象的原文
@@ -132,8 +134,15 @@ struct PopupSession {
 }
 
 impl PopupSession {
+    fn claim_explain_timeout(&mut self, generation: u64) -> Option<String> {
+        if self.explain_watch != Some(generation) { return None; }
+        self.invalidate("explain");
+        self.requested.insert("explain".into());
+        Some(self.text.clone())
+    }
     /// 重译/换领域先撤销旧流、检索与记忆配对，迟到结果不能覆盖新结果。
     fn invalidate(&mut self, kind: &str) {
+        if kind == "explain" { self.explain_watch = None; }
         self.requested.remove(kind);
         self.failed.remove(kind);
         self.req_seq.remove(kind);
@@ -459,6 +468,7 @@ pub fn start(app: AppHandle, cfg: Value) {
                 Ok(AppEvent::SetDomain { id }) => on_set_domain(&ori, &id),
                 Ok(AppEvent::KbCheck) => maybe_refresh_kb(&ori),
                 Ok(AppEvent::Retry { kind }) => on_retry(&ori, &kind),
+                Ok(AppEvent::ExplainTimeout { generation }) => on_explain_timeout(&ori, generation),
                 Ok(AppEvent::Retranslate { mode }) => {
                     if let Some(mode) = TranslationMode::parse(&mode) {
                         ori.session.lock().unwrap().translation_mode = Some(mode);
@@ -539,6 +549,16 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
     if text.is_empty() {
         return;
     }
+    if kind == "explain" && ori.provider_for(kind) == "ollama" {
+        let generation = ori.search_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        ori.session.lock().unwrap().explain_watch = Some(generation);
+        if let Some(tx) = ori.app.try_state::<Bridge>().map(|b| b.0.clone()) {
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(60));
+                let _ = tx.send(AppEvent::ExplainTimeout { generation });
+            });
+        }
+    }
     let provider = if kind == "translate" {
         let mode = ori.session.lock().unwrap().translation_mode.unwrap_or_else(|| {
             if ori.provider_for(kind) == "openai" { TranslationMode::Cloud } else { TranslationMode::Local }
@@ -576,6 +596,26 @@ fn dispatch_request(ori: &SharedOri, kind: &str) {
             .pending_source
             .insert(kind.to_owned(), (rid, text));
     }
+}
+
+fn on_explain_timeout(ori: &SharedOri, generation: u64) {
+    let text = {
+        let mut session = ori.session.lock().unwrap();
+        let Some(text) = session.claim_explain_timeout(generation) else { return };
+        text
+    };
+    ori.llm.cancel(&["explain"]);
+    let cfg = ori.cfg();
+    let _ = ori.app.emit("llm:reset", json!({"kind":"explain"}));
+    if cfg["offline"].as_bool().unwrap_or(false) || dongyi_llm::cloud_key_for(&cfg["cloud"]).is_empty() {
+        let _ = ori.app.emit("llm:event", json!({"type":"failed","kind":"explain","req_id":0,
+            "error":"本地解释超过 1 分钟仍无输出；请关闭离线模式并配置云端模型 key 后重试。"}));
+        return;
+    }
+    let _ = ori.app.emit("explain:fallback", json!({"provider":"openai"}));
+    let sys = ori.compose_system("explain", &text, ori.prompt_of("explain"), "");
+    let messages = vec![("system".into(), sys), ("user".into(), text)];
+    bind_request(ori, "explain", LlmRequest::from_cfg("explain", messages, &cfg).with_provider("openai"));
 }
 
 fn translation_mode_error(mode: TranslationMode, cfg: &Value) -> Option<String> {
@@ -647,11 +687,7 @@ fn search_then_request(ori: SharedOri, kind: String, query: String, cfg: Value) 
 
 /// SearchDone 处理（编排串行）：sgen 未被 Stop/重试作废、epoch 未被关闭/新会话
 /// 推进，两者同时成立才注入 ctx 并启动请求；否则检索结果静默丢弃。
-fn on_search_done(ori: &SharedOri, kind: &str, context: String, sources: Vec<SearchSource>, error: Option<String>, sgen: u64, epoch_at_start: u64) {
-    if ori.req_epoch.load(Ordering::SeqCst) != epoch_at_start {
-        eprintln!("[orch] search late drop kind={kind} (epoch moved)");
-        return;
-    }
+fn on_search_done(ori: &SharedOri, kind: &str, context: String, sources: Vec<SearchSource>, error: Option<String>, sgen: u64, _epoch_at_start: u64) {
     let gen_ok = ori
         .session
         .lock()
@@ -752,6 +788,7 @@ fn begin_session(ori: &Ori) {
     ori.llm.cancel(&["translate", "explain", "chat", "input"]);
     {
         let mut s = ori.session.lock().unwrap();
+        s.explain_watch = None;
         s.translation_mode = None;
         s.active_kind.clear();
         s.chat_history.clear();
@@ -946,6 +983,7 @@ fn close_all(ori: &Ori) {
         let mut s = ori.session.lock().unwrap();
         s.req_seq.clear();
         s.search_gen.clear();
+        s.explain_watch = None;
         s.failed.clear();
     }
     if let Some(popup) = ori.popup() {
@@ -1306,6 +1344,7 @@ fn on_stop(ori: &Ori, kind: &str) {
     ori.llm.cancel(&[kind]);
     {
         let mut s = ori.session.lock().unwrap();
+        if kind == "explain" { s.explain_watch = None; }
         s.search_gen.remove(kind);
         s.req_seq.remove(kind);
         s.failed.remove(kind); // F8：停止后清失败标记，解释切回可自动重发
@@ -1595,6 +1634,12 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
         eprintln!("[orch] drop stale llm event kind={kind} req={req_id} (current={current:?})");
         return;
     }
+    if kind == "explain" && matches!(&ev, LlmEvent::Chunk { delta, .. } if !delta.trim().is_empty()) {
+        ori.session.lock().unwrap().explain_watch = None;
+    }
+    if kind == "explain" && matches!(&ev, LlmEvent::Finished { .. }) {
+        ori.session.lock().unwrap().explain_watch = None;
+    }
     if let LlmEvent::Finished { full_text, truncated: false, .. } = &ev {
         let mut s = ori.session.lock().unwrap();
         let target = if kind == "input" { s.last_target.as_deref() } else { None };
@@ -1652,6 +1697,21 @@ fn on_llm_event(ori: &Ori, ev: LlmEvent) {
 #[cfg(test)]
 mod tab_switch_tests {
     use super::{PopupSession, TranslationMode, translation_mode_error, translation_query};
+
+    #[test]
+    fn explain_timeout_only_claims_current_request_once() {
+        let mut s = PopupSession { text: "source".into(), explain_watch: Some(42), ..Default::default() };
+        s.req_seq.insert("explain".into(), 7);
+        s.search_gen.insert("explain".into(), 9);
+        assert!(s.claim_explain_timeout(41).is_none());
+        assert_eq!(s.claim_explain_timeout(42).as_deref(), Some("source"));
+        assert!(s.req_seq.get("explain").is_none());
+        assert!(s.search_gen.get("explain").is_none());
+        assert!(s.claim_explain_timeout(42).is_none());
+        s.explain_watch = Some(43);
+        s.invalidate("explain");
+        assert!(s.claim_explain_timeout(43).is_none());
+    }
 
     #[test]
     fn manual_translation_modes_use_chosen_provider_and_respect_offline() {
