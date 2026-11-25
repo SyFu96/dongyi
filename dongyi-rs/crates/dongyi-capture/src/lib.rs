@@ -4,8 +4,8 @@
 //! - 所有 UIA/剪贴板调用在常驻捕获线程内做，线程启动即 CoInitialize(MTA)。
 //! - 静默（拖选）路径永不碰用户剪贴板；显式（热键）路径是用户明确动作，
 //!   UIA 失败即走兜底，不受白名单限制。
-//! - 兜底只在"可可靠还原"的剪贴板上操作（空/纯文本及其合成格式组合；
-//!   含图片/文件/富格式直接跳过）；备份/还原用本线程临时创建的
+//! - 兜底只在"可可靠还原"的剪贴板上操作（空/纯文本及其合成格式组合，
+//!   或纯文本 + HTML Format；含图片/文件/其他富格式直接跳过）；备份/还原用本线程临时创建的
 //!   message-only owner 窗口——MS 文档明示 owner=NULL 时 SetClipboardData
 //!   可能失败，绝不能 OpenClipboard(None) 后写剪贴板。
 //! - 剪贴板序号是"复制是否成功"的唯一可信信号：备份序号必须**读取完成后**
@@ -15,7 +15,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
@@ -297,6 +298,17 @@ const TEXT_FORMAT_OK: [u32; 4] = [
     16, // CF_LOCALE（伴随 ANSI 文本出现）
 ];
 
+/// PDF 阅读器（如 PdfCraft）复制选区时会在纯文本之外附带 HTML Format。
+/// 只还原文本会丢掉用户剪贴板里的 HTML，因此按原始字节一起备份/还原。
+const HTML_FORMAT_NAME: windows::core::PCWSTR = w!("HTML Format");
+/// 单个格式的备份上限；异常的巨型 HTML 视为不可可靠还原，静默路径跳过。
+const MAX_CLIP_FORMAT_BYTES: usize = 16 * 1024 * 1024;
+
+fn html_format_id() -> u32 {
+    static ID: OnceLock<u32> = OnceLock::new();
+    *ID.get_or_init(|| unsafe { RegisterClipboardFormatW(HTML_FORMAT_NAME) })
+}
+
 fn clip_seq() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
@@ -377,13 +389,34 @@ struct ClipSnapshot {
     seq: u32,
     /// 备份纯文本；"" = 空剪贴板（还原=清空）；None = 读取失败
     text: Option<String>,
-    /// 空或纯文本合成组合 → 可可靠还原
-    text_only: bool,
+    /// 备份的 HTML Format 原始字节（含剪贴板头）；None = 原剪贴板没有该格式
+    html: Option<Vec<u8>>,
+    /// 空或纯文本合成组合，或纯文本 + HTML → 可可靠还原
+    restorable: bool,
     /// False = 枚举/读取失败或剪贴板被占用（不该发键）
     ok: bool,
 }
 
-/// 同一 OpenClipboard 事务内：枚举格式 → 读纯文本 → 记录序号。
+/// HGLOBAL 原始字节（HTML Format 等注册格式）。
+unsafe fn read_handle_bytes(handle: HANDLE) -> Option<Vec<u8>> { unsafe {
+    let h = HGLOBAL(handle.0);
+    let len = GlobalSize(h);
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    if len > MAX_CLIP_FORMAT_BYTES {
+        return None;
+    }
+    let ptr = GlobalLock(h) as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
+    let _ = GlobalUnlock(h);
+    Some(bytes)
+}}
+
+/// 同一 OpenClipboard 事务内：枚举格式 → 读纯文本 / HTML → 记录序号。
 ///
 /// 序号必须在**读取完成后**（关板前）记录：读备份可能触发目标应用的延迟
 /// 渲染（GetClipboardData → WM_RENDERFORMAT → SetClipboardData），期间序号
@@ -392,15 +425,35 @@ struct ClipSnapshot {
 unsafe fn clipboard_backup_snapshot() -> ClipSnapshot { unsafe {
     if open_clipboard_with_retry(None) {
         let out = (|| {
-            let mut text_only = true;
+            let html_id = html_format_id();
+            let mut restorable = true;
+            let mut html: Option<Vec<u8>> = None;
             let mut fmt = 0u32;
             loop {
                 fmt = EnumClipboardFormats(fmt);
                 if fmt == 0 {
                     break; // 0 = 枚举结束
                 }
-                if !TEXT_FORMAT_OK.contains(&fmt) {
-                    text_only = false;
+                if html_id != 0 && fmt == html_id {
+                    if html.is_some() {
+                        restorable = false; // 重复的 HTML Format：不猜哪个是原样
+                        break;
+                    }
+                    match GetClipboardData(fmt) {
+                        Ok(handle) => match read_handle_bytes(handle) {
+                            Some(bytes) => html = Some(bytes),
+                            None => {
+                                restorable = false;
+                                break;
+                            }
+                        },
+                        Err(_) => {
+                            restorable = false;
+                            break;
+                        }
+                    }
+                } else if !TEXT_FORMAT_OK.contains(&fmt) {
+                    restorable = false;
                     break;
                 }
             }
@@ -420,13 +473,13 @@ unsafe fn clipboard_backup_snapshot() -> ClipSnapshot { unsafe {
                 }
             }
             let seq = clip_seq(); // 读取后、关板前：延迟渲染已使序号稳定
-            ClipSnapshot { seq, text, text_only, ok }
+            ClipSnapshot { seq, text, html, restorable, ok }
         })();
         let _ = CloseClipboard();
         return out;
     }
     eprintln!("[clipboard] timeout phase=backup");
-    ClipSnapshot { seq: 0, text: None, text_only: false, ok: false } // 一直被占用
+    ClipSnapshot { seq: 0, text: None, html: None, restorable: false, ok: false } // 一直被占用
 }}
 
 /// 一个 KEYBDINPUT 键事件
@@ -493,8 +546,13 @@ unsafe fn clipboard_owner_hwnd() -> Option<HWND> { unsafe {
 ///
 /// - OpenClipboard(hwnd) 成功后核对序号 == expect_seq：不等则写回会清掉
 ///   用户新内容，跳过。
-/// - text=None 跳过还原；"" = 只 Empty（还原为空）。
-unsafe fn restore_clipboard_text_sync(hwnd: HWND, text: Option<&str>, expect_seq: u32) -> bool { unsafe {
+/// - text=None 跳过还原；"" = 不写纯文本（若 html 存在仍写回）。
+unsafe fn restore_clipboard_text_sync(
+    hwnd: HWND,
+    text: Option<&str>,
+    html: Option<&[u8]>,
+    expect_seq: u32,
+) -> bool { unsafe {
     if open_clipboard_with_retry(Some(hwnd)) {
         let out = (|| {
             if clip_seq() != expect_seq {
@@ -508,26 +566,46 @@ unsafe fn restore_clipboard_text_sync(hwnd: HWND, text: Option<&str>, expect_seq
             if EmptyClipboard().is_err() {
                 return false;
             }
-            if t.is_empty() {
-                return true;
+            if !t.is_empty() {
+                // CF_UNICODETEXT：UTF-16 + NUL 结尾
+                let bytes: Vec<u16> = t.encode_utf16().chain([0]).collect();
+                let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len() * 2) else {
+                    return false;
+                };
+                let p = GlobalLock(h) as *mut u16;
+                if p.is_null() {
+                    let _ = GlobalFree(Some(h));
+                    return false;
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+                let _ = GlobalUnlock(h);
+                // 注意：SetClipboardData 成功后 hmem 所有权归剪贴板，不能 GlobalFree
+                if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_err() {
+                    let _ = GlobalFree(Some(h));
+                    log::warn!("剪贴板文本写回失败");
+                    return false;
+                }
             }
-            // CF_UNICODETEXT：UTF-16 + NUL 结尾
-            let bytes: Vec<u16> = t.encode_utf16().chain([0]).collect();
-            let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len() * 2) else {
-                return false;
-            };
-            let p = GlobalLock(h) as *mut u16;
-            if p.is_null() {
-                let _ = GlobalFree(Some(h));
-                return false;
-            }
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
-            let _ = GlobalUnlock(h);
-            // 注意：SetClipboardData 成功后 hmem 所有权归剪贴板，不能 GlobalFree
-            if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_err() {
-                let _ = GlobalFree(Some(h));
-                log::warn!("剪贴板写回失败");
-                return false;
+            // HTML Format 原样写回（PdfCraft 等自绘阅读器会附带它）
+            if let Some(bytes) = html.filter(|b| !b.is_empty()) {
+                let html_id = html_format_id();
+                if html_id != 0 {
+                    let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) else {
+                        return false;
+                    };
+                    let p = GlobalLock(h) as *mut u8;
+                    if p.is_null() {
+                        let _ = GlobalFree(Some(h));
+                        return false;
+                    }
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+                    let _ = GlobalUnlock(h);
+                    if SetClipboardData(html_id, Some(HANDLE(h.0))).is_err() {
+                        let _ = GlobalFree(Some(h));
+                        log::warn!("剪贴板 HTML 写回失败");
+                        return false;
+                    }
+                }
             }
             true
         })();
@@ -551,7 +629,7 @@ unsafe fn restore_clipboard_text_delayed(text: Option<String>, expect_seq: u32) 
             log::warn!("延迟还原：owner 创建失败，放弃写回");
             return;
         };
-        restore_clipboard_text_sync(hwnd, text.as_deref(), expect_seq);
+        restore_clipboard_text_sync(hwnd, text.as_deref(), None, expect_seq);
         let _ = DestroyWindow(hwnd);
     });
 }}
@@ -590,8 +668,8 @@ pub fn clipboard_selection(
                 log::debug!("剪贴板快照失败，跳过兜底（不发键）");
                 return None;
             }
-            if silent && !snap.text_only {
-                log::debug!("剪贴板含不可纯文本还原的格式，静默跳过兜底");
+            if silent && !snap.restorable {
+                eprintln!("[capture] 剪贴板含不可可靠还原的格式，静默跳过兜底");
                 return None;
             }
             if let Some(f) = still_valid {
@@ -631,7 +709,12 @@ pub fn clipboard_selection(
             // 读结果与序号核对在同一开板窗口内
             let text = clipboard_text(Some(copied_seq));
             if silent {
-                restore_clipboard_text_sync(owner.unwrap(), snap.text.as_deref(), copied_seq);
+                restore_clipboard_text_sync(
+                    owner.unwrap(),
+                    snap.text.as_deref(),
+                    snap.html.as_deref(),
+                    copied_seq,
+                );
             } else {
                 // ""（原剪贴板为空）→ None：显式路径跳过还原，保持旧行为
                 let backup = match snap.text.as_deref() {
@@ -896,12 +979,16 @@ fn capture_silent(
         if !still_valid() {
             return None;
         }
-        let (ok, _) = silent_fallback_ok(&job.cfg, Some(target));
+        let (ok, why) = silent_fallback_ok(&job.cfg, Some(target));
         if ok {
             // still_valid 再交给 clipboard_selection 内部复查（发键前）
             let still: &dyn Fn() -> bool = &still_valid;
             clipboard_selection(job.cfg.max_text_len, true, Some(still))
         } else {
+            // 白名单进程才进入静默兜底；非白名单的常态拒绝不刷日志。
+            if !why.starts_with("not-whitelisted:") {
+                eprintln!("[capture] 静默兜底拒绝：{why}");
+            }
             None
         }
     });
