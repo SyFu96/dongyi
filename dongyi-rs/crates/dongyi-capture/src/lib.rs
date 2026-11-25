@@ -79,6 +79,9 @@ pub struct CaptureCfg {
     pub clipboard_fallback: bool,
     pub clipboard_fallback_processes: Vec<String>,
     pub blacklist_processes: Vec<String>,
+    /// 显式热键最后兜底：UIA/模拟 Ctrl+C 都失败时，读取用户当前剪贴板
+    /// （用户可先手动 Ctrl+C 再按热键）。默认开启，可在 config.json 关闭。
+    pub clipboard_current_fallback: bool,
 }
 
 impl CaptureCfg {
@@ -94,6 +97,9 @@ impl CaptureCfg {
             clipboard_fallback: v["clipboard_fallback"].as_bool().unwrap_or(true),
             clipboard_fallback_processes: str_list(&v["clipboard_fallback_processes"]),
             blacklist_processes: str_list(&v["blacklist_processes"]),
+            clipboard_current_fallback: v["clipboard_current_fallback"]
+                .as_bool()
+                .unwrap_or(true),
         }
     }
 }
@@ -781,6 +787,50 @@ pub fn silent_fallback_ok(cfg: &CaptureCfg, fg_hwnd: Option<isize>) -> (bool, St
     (true, pname)
 }
 
+/// 读当前剪贴板纯文本（不发键、不改写）。显式热键在 UIA 与模拟 Ctrl+C
+/// 都失败后的最终兜底：用户可先自行 Ctrl+C，再按 Alt+T 翻译剪贴板内容。
+/// 终端窗口仍跳过，避免把中断信号/敏感剪贴板内容当成选区。
+pub fn clipboard_current_text(max_text_len: usize) -> Option<Selection> {
+    unsafe {
+        let cls = foreground_hwnd().map(window_class).unwrap_or_default();
+        if TERMINAL_EXCLUDED_CLASSES.contains(&cls.as_str()) {
+            return None;
+        }
+        if !open_clipboard_with_retry(None) {
+            eprintln!("[clipboard] timeout phase=current");
+            return None;
+        }
+        let out = (|| {
+            if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_err() {
+                return None;
+            }
+            let text = GetClipboardData(CF_UNICODETEXT.0 as u32)
+                .ok()
+                .and_then(|handle| read_handle_text(handle))?;
+            let raw_len = text.trim().chars().count();
+            if raw_len == 0 {
+                return None;
+            }
+            let truncated = raw_len > max_text_len;
+            let mut text = text.trim().to_owned();
+            if truncated {
+                text = text.chars().take(max_text_len).collect();
+            }
+            Some(Selection {
+                text,
+                rect: None,
+                source: SelectionSource::Clipboard,
+                truncated,
+            })
+        })();
+        let _ = CloseClipboard();
+        if let Some(sel) = &out {
+            eprintln!("[clipboard] current fallback chars={}", sel.text.chars().count());
+        }
+        out
+    }
+}
+
 /// 取选中文本（供测试脚本同步调用；应用内走 CaptureWorker）。
 ///
 /// 先 UIA；失败后：
@@ -793,7 +843,13 @@ pub fn get_selection(mode: Mode, cfg: &CaptureCfg) -> Option<Selection> {
         return Some(sel);
     }
     match mode {
-        Mode::Explicit => clipboard_selection(cfg.max_text_len, false, None),
+        Mode::Explicit => clipboard_selection(cfg.max_text_len, false, None).or_else(|| {
+            if cfg.clipboard_current_fallback {
+                clipboard_current_text(cfg.max_text_len)
+            } else {
+                None
+            }
+        }),
         Mode::Silent => {
             let (ok, _) = silent_fallback_ok(cfg, None);
             if ok {
@@ -925,7 +981,12 @@ fn worker_run(
                     Some(_) => None, // UIA 命中但请求已过期/切窗 → 不投递
                     None => {
                         let still: &dyn Fn() -> bool = &still_valid;
-                        clipboard_selection(job.cfg.max_text_len, false, Some(still))
+                        let sel = clipboard_selection(job.cfg.max_text_len, false, Some(still));
+                        if sel.is_none() && job.cfg.clipboard_current_fallback && still_valid() {
+                            clipboard_current_text(job.cfg.max_text_len)
+                        } else {
+                            sel
+                        }
                     }
                 };
                 eprintln!("[capture-worker] kind={} elapsed_ms={} source={:?} valid={}",

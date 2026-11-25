@@ -769,7 +769,7 @@ function ResultView({ tab, state, mode = "local", canTranslate = true, explainFa
           <span className="text-muted">{tab === "译文" ? "翻译请求中…" : "解释请求中…"}</span>
         ) : (
           state.text ? (
-            tab === "解释" ? <MarkdownContent text={state.text} /> : <div className="whitespace-pre-wrap">{state.text}</div>
+            <MarkdownContent text={state.text} />
           ) : <span className="text-muted">…</span>
         )}
       </div>
